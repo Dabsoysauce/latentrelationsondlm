@@ -1,0 +1,47 @@
+# Default run: DiffuLLaMA-7B over the full UD English-EWT treebank.
+#
+# Differences from the 2026 pipeline this replaces, all deliberate:
+#   * random sampling instead of the first N sentences (EWT is genre-ordered)
+#   * three disjoint splits so head selection is itself held out
+#   * max_seq_len 128 rather than 64, keeping long-distance dependencies
+#   * ~6k probing sentences rather than 1.2k
+
+treebank:
+  treebanks:
+    - UD_English-EWT
+  cache_dir: data/ud
+  n_select: 4000
+  n_dev: 1000
+  n_test: 1000
+  max_seq_len: 128
+  min_seq_len: 4
+  shuffle: true
+  seed: 42
+  skip_multiword: true
+  require_full_alignment: true
+
+model:
+  name: diffusionfamily/diffullama
+  family: diffullama
+  dtype: bfloat16
+  device: cuda
+  # Must stay "eager": sdpa and flash_attention_2 return no attention weights.
+  attn_implementation: eager
+
+diffusion:
+  steps: 64
+  seed: 42
+  seeds: [42, 43, 44, 45, 46]
+  include_bos: true
+  exclude_bos: true
+  exclude_self: true
+  attender_token: last
+  min_masked_positions: 25
+
+analysis:
+  offset_range: [-15, 15]
+  n_bootstrap: 10000
+  ci: 0.95
+  distance_bins: [1, 2, 3, 5, 8, 100]
+
+out_dir: results/diffullama-ewt

@@ -1,0 +1,24 @@
+# Data and model artifacts are re-downloadable; results are re-derivable.
+data/
+third_party/
+results/**/
+!results/.gitkeep
+
+# Keep small analysis outputs that the README cites.
+!results/**/head_vs_null.csv
+!results/**/offset_null.csv
+!results/**/config.yaml
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+.DS_Store
