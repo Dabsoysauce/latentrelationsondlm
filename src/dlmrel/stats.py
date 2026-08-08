@@ -63,9 +63,12 @@ def build_head_vs_null_table(
 ) -> pd.DataFrame:
     """The paper's headline table: best head per relation against the null.
 
-    `verdict` is deliberately conservative. A relation only counts as surviving
-    when the head's confidence interval clears the null point estimate -- a
-    head whose interval contains the null is not evidence of anything.
+    `verdict` requires the head's interval to clear the *null's upper bound*,
+    not the null's point estimate. The null is an estimate too, and comparing
+    an interval to a point ignores its uncertainty: on UD-EWT that let subject
+    determiner->noun read "survives" on a margin of 0.0009, which is a rounding
+    artifact rather than a finding. Non-overlapping intervals is the weaker,
+    honest claim the data actually supports.
     """
     nulls = null_table.set_index("relation")
     rows = []
@@ -74,6 +77,8 @@ def build_head_vs_null_table(
         if relation not in nulls.index:
             continue
         null_acc = float(nulls.loc[relation, "null_test_acc"])
+        # Fall back to the point estimate when the null table predates CIs.
+        null_hi = float(nulls.loc[relation].get("null_ci_hi", null_acc))
         k = int(nulls.loc[relation, "k"])
 
         # Select on the selection split only; report the winner's test score.
@@ -94,12 +99,14 @@ def build_head_vs_null_table(
                 "head_ci_hi": hi,
                 "null_k": k,
                 "null_test_acc": null_acc,
+                "null_ci_hi": null_hi,
                 "delta": float(best[test_col]) - null_acc,
+                "margin": lo - null_hi,
                 "n_heads_above_null": n_heads_above_null(group, null_acc, test_col),
                 "n_heads_total": len(group),
                 "selection_rho": rho,
                 "n_test": n_t,
-                "verdict": "survives" if lo > null_acc else "not distinguishable",
+                "verdict": "survives" if lo > null_hi else "not distinguishable",
             }
         )
 
