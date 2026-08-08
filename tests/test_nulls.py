@@ -118,3 +118,53 @@ def test_bootstrap_ci_on_empty_input_is_nan():
 def test_missing_relation_raises():
     with pytest.raises(ValueError):
         fit_offset_null(make([("a", [1], [2])]), "nonexistent")
+
+
+class TestVerdictUsesNullInterval:
+    """A head must clear the null's upper bound, not its point estimate.
+
+    Comparing an interval to a point treats the null as if it were known
+    exactly. On UD-EWT that let subject determiner->noun read "survives" on a
+    margin of 0.0009 -- an artifact of where the rounding fell, not a result.
+    """
+
+    def _tables(self, n_correct, n_total, null_acc, null_hi):
+        import pandas as pd
+
+        scores = pd.DataFrame(
+            [{"relation": "r", "layer": 0, "head": 0, "accuracy_select": 0.9,
+              "accuracy_test": n_correct / n_total, "n_correct_test": n_correct,
+              "n_total_test": n_total},
+             {"relation": "r", "layer": 1, "head": 1, "accuracy_select": 0.1,
+              "accuracy_test": 0.1, "n_correct_test": 10, "n_total_test": 100}]
+        )
+        nulls = pd.DataFrame([{"relation": "r", "k": 1, "null_test_acc": null_acc,
+                               "null_ci_hi": null_hi}])
+        return scores, nulls
+
+    def test_head_inside_the_null_interval_does_not_survive(self):
+        from dlmrel.stats import build_head_vs_null_table
+
+        # Head at 0.65 with a wide null interval reaching 0.72: not separable.
+        scores, nulls = self._tables(221, 340, null_acc=0.60, null_hi=0.72)
+        row = build_head_vs_null_table(scores, nulls).iloc[0]
+        assert row.verdict == "not distinguishable"
+        assert row.margin < 0
+
+    def test_head_clearing_the_null_upper_bound_survives(self):
+        from dlmrel.stats import build_head_vs_null_table
+
+        scores, nulls = self._tables(860, 1075, null_acc=0.30, null_hi=0.34)
+        row = build_head_vs_null_table(scores, nulls).iloc[0]
+        assert row.verdict == "survives"
+        assert row.margin > 0
+
+    def test_missing_null_ci_falls_back_to_the_point_estimate(self):
+        # Old null tables predate the CI columns; they must still analyze.
+        import pandas as pd
+
+        from dlmrel.stats import build_head_vs_null_table
+
+        scores, _ = self._tables(860, 1075, 0.30, 0.34)
+        nulls = pd.DataFrame([{"relation": "r", "k": 1, "null_test_acc": 0.30}])
+        assert build_head_vs_null_table(scores, nulls).iloc[0].verdict == "survives"
