@@ -22,3 +22,7 @@ venv/
 .ipynb_checkpoints/
 
 .DS_Store
+
+# Colab upload bundle and its unpacked copy are build artifacts of this repo.
+*.zip
+dlmrel-colab/

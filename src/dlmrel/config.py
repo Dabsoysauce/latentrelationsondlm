@@ -64,6 +64,19 @@ class TreebankConfig:
     # Drop a sentence if any UD word fails to align to a model token.
     require_full_alignment: bool = True
 
+    # Models whose tokenizers must all admit a sentence for it to enter the
+    # pool. Splits are carved by index from a shuffled pool, so two models that
+    # admit slightly different sentences end up with badly misaligned splits --
+    # a ~1% pool difference produced only 73% test-split overlap. Listing both
+    # models here makes the pool, and therefore the splits, identical.
+    common_pool_models: list[str] = field(default_factory=list)
+
+    # UD-EWT is web text and repeats boilerplate verbatim ("Attached are the gas
+    # settlement and support for May."). Keeping every copy puts the same
+    # sentence in two splits -- measured at 27 test sentences also present in
+    # the selection split -- so head selection would partly see its own test set.
+    dedupe_by_text: bool = True
+
 
 @dataclass
 class ModelConfig:

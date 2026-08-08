@@ -1,10 +1,15 @@
-# Default run: DiffuLLaMA-7B over the full UD English-EWT treebank.
+# DiffuGPT-S (12L x 12H = 144 heads) over the same splits as default.yaml.
 #
-# Differences from the 2026 pipeline this replaces, all deliberate:
-#   * random sampling instead of the first N sentences (EWT is genre-ordered)
-#   * three disjoint splits so head selection is itself held out
-#   * max_seq_len 128 rather than 64, keeping long-distance dependencies
-#   * ~6k probing sentences rather than 1.2k
+# Two uses:
+#   1. End-to-end smoke test before spending time on the 7B. This model's
+#      answer is already known -- L4 H0 should come out top for object->verb
+#      at roughly 0.75 -- so a wrong number here means the pipeline is broken,
+#      not the science.
+#   2. The small-model arm of the paper. The pilot DiffuGPT-S numbers came from
+#      the old pipeline, so they cannot share a table with new 7B numbers until
+#      this model is re-scored on these splits.
+#
+# Everything except the model block is identical to default.yaml, deliberately.
 
 treebank:
   treebanks:
@@ -25,9 +30,9 @@ treebank:
     - diffusionfamily/diffullama
 
 model:
-  name: diffusionfamily/diffullama
-  family: diffullama
-  dtype: bfloat16
+  name: diffusionfamily/diffugpt-s
+  family: diffugpt
+  dtype: float32
   device: cuda
   # Must stay "eager": sdpa and flash_attention_2 return no attention weights.
   attn_implementation: eager
@@ -48,4 +53,4 @@ analysis:
   ci: 0.95
   distance_bins: [1, 2, 3, 5, 8, 100]
 
-out_dir: results/diffullama-ewt
+out_dir: results/diffugpt-s-ewt

@@ -118,3 +118,45 @@ def test_char_spans_fail_closed_on_mismatch():
 def test_repeated_forms_advance_the_cursor():
     spans = find_char_spans("the cat the dog", ["the", "cat", "the", "dog"])
     assert spans == [(0, 3), (4, 7), (8, 11), (12, 15)]
+
+
+class TestCommonPool:
+    """Pool restriction has to preserve order, not just membership.
+
+    Splits are taken by index from a shuffled pool, so if the two models'
+    filtered sequences differ in order the splits diverge even when the sets
+    match. These pin both properties.
+    """
+
+    def _ex(self, text):
+        from dlmrel.relations import Example
+
+        return Example(
+            text=text, tokens=[], upos=[], deprel=[], head=[],
+            word_to_tokens={}, relations=[], seq_len=4,
+        )
+
+    def test_keeps_only_common_sentences(self):
+        from dlmrel.splits import restrict_to_texts
+
+        pool = [self._ex(t) for t in ("a", "b", "c", "d")]
+        kept = restrict_to_texts(pool, {"b", "d"})
+        assert [e.text for e in kept] == ["b", "d"]
+
+    def test_preserves_pool_order_not_set_order(self):
+        from dlmrel.splits import restrict_to_texts
+
+        pool = [self._ex(t) for t in ("z", "y", "x")]
+        kept = restrict_to_texts(pool, {"x", "y", "z"})
+        assert [e.text for e in kept] == ["z", "y", "x"]
+
+    def test_two_models_agree_after_restriction(self):
+        # The real failure mode: each model admits a different sentence, so the
+        # unrestricted pools diverge; restricting to the intersection aligns them.
+        from dlmrel.splits import restrict_to_texts
+
+        gpt2 = [self._ex(t) for t in ("a", "b", "c")]
+        llama = [self._ex(t) for t in ("a", "c", "d")]
+        common = {e.text for e in gpt2} & {e.text for e in llama}
+        assert [e.text for e in restrict_to_texts(gpt2, common)] == ["a", "c"]
+        assert [e.text for e in restrict_to_texts(llama, common)] == ["a", "c"]
