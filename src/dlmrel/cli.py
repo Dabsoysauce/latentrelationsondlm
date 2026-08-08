@@ -30,32 +30,16 @@ def _out(cfg: Config) -> Path:
 def cmd_data(cfg: Config) -> None:
     from transformers import AutoTokenizer
 
-    from .relations import build_examples, relations_to_records
-    from .treebank import load_treebanks, split_sentences
+    from .relations import relations_to_records
+    from .splits import build_all_splits
 
     out = _out(cfg)
     tokenizer = AutoTokenizer.from_pretrained(cfg.model.name)
 
-    sentences = load_treebanks(cfg.treebank.treebanks, cfg.treebank.cache_dir)
-    print(f"[data] pooled {len(sentences)} sentences")
-
-    # Filter first, then split, so the requested split sizes are counts of
-    # *usable* sentences rather than of candidates.
-    usable = build_examples(
-        sentences,
-        tokenizer,
-        cfg.treebank,
-        include_bos=cfg.diffusion.include_bos,
-        tag="pool",
-    )
-    splits = split_sentences(
-        usable,
-        cfg.treebank.n_select,
-        cfg.treebank.n_dev,
-        cfg.treebank.n_test,
-        cfg.treebank.seed,
-        cfg.treebank.shuffle,
-    )
+    # Deliberately the same call the GPU stages use to rebuild their splits. It
+    # used to be duplicated here, which meant a change to one path silently did
+    # not reach the other.
+    splits = build_all_splits(cfg, tokenizer)
 
     records = []
     for name, examples in splits.items():
