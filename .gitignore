@@ -26,3 +26,6 @@ venv/
 # Colab upload bundle and its unpacked copy are build artifacts of this repo.
 *.zip
 dlmrel-colab/
+
+# Generated figures are reproducible from the result CSVs.
+figures/
