@@ -1,8 +1,0 @@
-{
-  "name": "diffusionfamily/diffugpt-s",
-  "n_layers": 12,
-  "n_heads": 12,
-  "hidden_size": 768,
-  "mask_token_id": 10541,
-  "bos_token_id": 50256
-}
