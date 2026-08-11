@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dlmrel"
+version = "0.1.0"
+description = "Cross-model analysis of linguistic relations in diffusion language models"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "pyyaml",
+    "torch",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dream = ["transformers==4.51.3", "accelerate", "sentencepiece"]
+diffugpt = ["transformers==4.44.2", "accelerate"]
+diffullama = ["transformers==4.44.2", "accelerate", "sentencepiece"]
+llada = ["transformers", "accelerate", "sentencepiece"]
+probe = ["scikit-learn"]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+dlmrel = "dlmrel.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

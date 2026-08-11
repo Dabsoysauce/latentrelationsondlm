@@ -1,0 +1,6 @@
+name: llada_8b
+checkpoint: GSAI-ML/LLaDA-8B-Base
+adapter: llada
+dtype: bfloat16
+attention_implementation: eager
+trust_remote_code: true
