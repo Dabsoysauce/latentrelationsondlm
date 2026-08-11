@@ -1,0 +1,1 @@
+"""DiffuGPT-S adapter."""

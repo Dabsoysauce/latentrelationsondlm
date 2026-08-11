@@ -1,0 +1,6 @@
+name: diffullama_7b
+checkpoint: null
+adapter: diffullama
+dtype: bfloat16
+attention_implementation: eager
+trust_remote_code: true
