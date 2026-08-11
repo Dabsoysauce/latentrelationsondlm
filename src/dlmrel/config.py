@@ -108,6 +108,10 @@ class DiffusionConfig:
     # defaults that is 320,000, so both knobs exist to make it affordable.
     timestep_stride: int = 1
     n_curve_sentences: int | None = None
+    # Layerwise probes hold hidden states in memory, so both the sentence count
+    # and the layer stride are capped rather than run over the whole split.
+    n_probe_sentences: int | None = 400
+    probe_layer_stride: int = 4
 
 
 @dataclass

@@ -215,12 +215,106 @@ def cmd_analyze(cfg: Config) -> None:
         print(matched.to_string(index=False))
 
 
+def _probe_examples(cfg: Config, tokenizer, split: str):
+    from .splits import examples_for_split
+
+    examples = examples_for_split(cfg, tokenizer, split)
+    limit = cfg.diffusion.n_probe_sentences
+    return examples[:limit] if limit is not None else examples
+
+
+def cmd_entropy(cfg: Config) -> None:
+    from .model import load_model
+    from .probes import attention_entropy
+
+    out = _out(cfg)
+    model, tokenizer, _ = load_model(cfg.model)
+    examples = _probe_examples(cfg, tokenizer, "test")
+    print(f"[entropy] {len(examples)} sentences")
+
+    table = attention_entropy(model, tokenizer, examples, cfg.diffusion)
+    table.to_csv(out / "attention_entropy.csv", index=False)
+
+    print("\n=== lowest normalised entropy (most concentrated heads) ===")
+    print(table.nsmallest(5, "entropy_norm").to_string(index=False))
+    print("\n=== highest normalised entropy (most diffuse heads) ===")
+    print(table.nlargest(5, "entropy_norm").to_string(index=False))
+    print("\n=== per-layer mean ===")
+    print(
+        table.groupby("layer")[["entropy_norm", "entropy_no_sink", "sink_mass"]]
+        .mean()
+        .to_string()
+    )
+
+
+def cmd_logitlens(cfg: Config) -> None:
+    from .model import load_model
+    from .probes import logit_lens
+
+    out = _out(cfg)
+    model, tokenizer, _ = load_model(cfg.model)
+    examples = _probe_examples(cfg, tokenizer, "test")
+    print(f"[logit-lens] {len(examples)} sentences")
+
+    table = logit_lens(model, tokenizer, examples, cfg.diffusion)
+    table.to_csv(out / "logit_lens.csv", index=False)
+    print("\n=== true-token accuracy by depth ===")
+    print(
+        table.pivot_table(
+            index="depth", columns=["diffusion_time", "position_state"],
+            values="accuracy",
+        ).to_string()
+    )
+
+
+def cmd_posprobe(cfg: Config) -> None:
+    from .model import load_model
+    from .probes import collect_probe_features, most_frequent_tag_baseline, pos_probe
+
+    out = _out(cfg)
+    model, tokenizer, meta = load_model(cfg.model)
+
+    stride = max(1, cfg.diffusion.probe_layer_stride)
+    layers = list(range(0, meta["n_layers"] + 1, stride))
+    print(f"[pos-probe] layers {layers}")
+
+    train_ex = _probe_examples(cfg, tokenizer, "select")
+    test_ex = _probe_examples(cfg, tokenizer, "test")
+
+    train_x, train_y, train_f = collect_probe_features(
+        model, tokenizer, train_ex, cfg.diffusion, layers
+    )
+    test_x, test_y, test_f = collect_probe_features(
+        model, tokenizer, test_ex, cfg.diffusion, layers
+    )
+    print(f"[pos-probe] train tokens {len(train_y)}, test tokens {len(test_y)}")
+
+    baseline = most_frequent_tag_baseline(train_f, train_y, test_f, test_y)
+    majority = float(
+        (test_y == pd.Series(train_y).mode()[0]).mean()
+    )
+
+    table = pos_probe(train_x, train_y, test_x, test_y, seed=cfg.treebank.seed)
+    table["lexical_baseline"] = baseline
+    table["majority_baseline"] = majority
+    table["delta_vs_lexical"] = table["accuracy"] - baseline
+    table.to_csv(out / "pos_probe.csv", index=False)
+
+    print(f"\nmajority-class baseline      {majority:.4f}")
+    print(f"per-token-type tag baseline  {baseline:.4f}")
+    print("\n=== probe accuracy by depth ===")
+    print(table.to_string(index=False))
+
+
 COMMANDS = {
     "data": cmd_data,
     "nulls": cmd_nulls,
     "search": cmd_search,
     "curve": cmd_curve,
     "analyze": cmd_analyze,
+    "entropy": cmd_entropy,
+    "logitlens": cmd_logitlens,
+    "posprobe": cmd_posprobe,
 }
 
 
