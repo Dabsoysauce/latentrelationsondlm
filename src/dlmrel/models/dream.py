@@ -1,15 +1,3 @@
-"""Dream-7B adapter.
-
-Dream-org/Dream-v0-Base-7B is Qwen2-based and natively bidirectional, so it
-takes the raw ids with attention_mask=None and needs no third-party patch. It
-requires transformers>=4.51 (mutually exclusive with the DiffuLLaMA families'
-4.44.2 pin) and ships its own modelling code, so trust_remote_code is inherent.
-
-Established by the loading smoke test: the tokenizer prepends no BOS but a BOS
-token exists, so include_bos gives position 0 a dedicated sink slot; ~52% of
-attention lands there, so excluding it is a correction, not a distortion.
-"""
-
 from __future__ import annotations
 
 import torch
@@ -55,9 +43,8 @@ class DreamAdapter(ModelAdapter, torch.nn.Module):
         )
         if getattr(out, "attentions", None) is None:
             raise RuntimeError(
-                "Dream returned no attention weights; the remote code is "
-                "ignoring output_attentions and every accuracy would be zero. "
-                "Load with attn_implementation='eager'."
+                "Dream returned no attention weights; load with "
+                "attn_implementation='eager'."
             )
         if output_hidden_states:
             return None, out.attentions, out.hidden_states
@@ -65,11 +52,6 @@ class DreamAdapter(ModelAdapter, torch.nn.Module):
 
 
 def load(model_cfg: dict):
-    """Load Dream from a model config (configs/models/dream_7b.yaml).
-
-    Reads `checkpoint`; dtype/device/attn are optional and default to the
-    known-good Dream settings. Returns (adapter, tokenizer, meta).
-    """
     from transformers import AutoModel, AutoTokenizer
     from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
@@ -78,8 +60,6 @@ def load(model_cfg: dict):
     device = model_cfg.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
     attn = model_cfg.get("attn_implementation", "eager")
 
-    # Dream's remote code asks for rope_type="default", which some transformers
-    # builds expose as "rope" instead.
     if "default" not in ROPE_INIT_FUNCTIONS and "rope" in ROPE_INIT_FUNCTIONS:
         ROPE_INIT_FUNCTIONS["default"] = ROPE_INIT_FUNCTIONS["rope"]
 
@@ -99,7 +79,7 @@ def load(model_cfg: dict):
         ).eval()
 
     if tokenizer.mask_token_id is None:
-        raise ValueError(f"{checkpoint} exposes no mask token; the schedule needs one")
+        raise ValueError(f"{checkpoint} exposes no mask token")
 
     adapter = DreamAdapter(backbone, tokenizer, device).eval()
 
@@ -113,9 +93,11 @@ def load(model_cfg: dict):
         "bos_token_id": tokenizer.bos_token_id,
     }
 
-    # Fail loudly at load time rather than silently scoring zeros.
     probe = torch.tensor(
-        [[tokenizer.bos_token_id] + tokenizer.encode("The cat sat on the mat.", add_special_tokens=False)],
+        [
+            [tokenizer.bos_token_id]
+            + tokenizer.encode("The cat sat on the mat.", add_special_tokens=False)
+        ],
         device=adapter.device,
     )
     _, attentions = adapter.forward_attentions(probe)
