@@ -1,1 +1,1 @@
-"""Shared experiment metrics and positional controls."""
+"""Shared metrics."""

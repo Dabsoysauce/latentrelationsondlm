@@ -1,6 +1,2 @@
 name: diffugpt
-checkpoint: diffusionfamily/diffugpt-s
 adapter: diffugpt
-dtype: float32
-attention_implementation: eager
-trust_remote_code: true

@@ -1,52 +1,41 @@
 # Linguistic Relations in Diffusion Language Models
 
-This repository studies **where and when diffusion language models represent linguistic relations during denoising**.
+This repository studies where and when diffusion language models represent linguistic relations during denoising.
 
-We compare DiffuGPT-S, DiffuLLaMA-7B, Dream-7B, and LLaDA-8B using the same data and experimental procedures.
+We compare DiffuGPT-S, DiffuLLaMA-7B, Dream-7B, and LLaDA-8B using the same data, experiments, and evaluation methods.
 
 ## Experiments
 
 - Relation-head search
-- Relation accuracy over denoising time
+- Relation accuracy over diffusion time
 - Attention entropy
 - Part-of-speech probing
 - Logit-lens analysis
 
-## Structure
+## Repository structure
 
 ```text
 configs/     Model and experiment settings
-data/        Shared Universal Dependencies data and fixed splits
+data/        Shared Universal Dependencies data
 src/dlmrel/  Reusable model, experiment, and evaluation code
-results/     Outputs organized by model and experiment
+results/     Outputs organized by model
 tests/       Automated checks
 docs/        Shared protocol and team documentation
 ```
 
-`dlmrel` is the shared Python package. Model-specific behavior belongs in `src/dlmrel/models/`, while each experiment is implemented once in `src/dlmrel/experiments/`.
+`src/dlmrel/models/` contains model-specific code. Each shared experiment is implemented once in `src/dlmrel/experiments/`.
 
 ## Setup
 
 ```bash
-git clone <repository-url>
-cd dlm-generalization
 python -m venv .venv
-```
-
-Activate the environment:
-
-```bash
-# macOS or Linux
-source .venv/bin/activate
-
-# Windows PowerShell
-.venv\Scripts\Activate.ps1
-```
-
-Install the dependencies for the model you want to run:
-
-```bash
 pip install -e ".[dream]"
+```
+
+Activate the environment on Windows:
+
+```powershell
+.venv\Scripts\Activate.ps1
 ```
 
 ## Run an experiment
@@ -57,20 +46,12 @@ Prepare the shared UD data once:
 dlmrel prepare-data
 ```
 
-Run Dream-7B relation-head search:
+Run relation-head search on Dream-7B:
 
 ```bash
 dlmrel run --model dream_7b --experiment head_search
 ```
 
-Results are saved to:
-
-```text
-results/<model>/<experiment>/
-â”œâ”€â”€ config.yaml
-â”œâ”€â”€ metrics.csv
-â”œâ”€â”€ summary.json
-â””â”€â”€ figures/
-```
+Results are saved under `results/<model>/<experiment>/`.
 
 See `docs/experiment_protocol.md` for the shared scientific procedure.

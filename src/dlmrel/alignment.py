@@ -1,1 +1,1 @@
-"""Align Universal Dependencies words with model token spans."""
+"""UD-word to model-token alignment."""

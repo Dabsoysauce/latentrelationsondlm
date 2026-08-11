@@ -5,15 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dlmrel"
 version = "0.1.0"
-description = "Cross-model analysis of linguistic relations in diffusion language models"
+description = "Linguistic-relation analysis for diffusion language models"
 requires-python = ">=3.10"
-dependencies = [
-    "numpy",
-    "pandas",
-    "pyyaml",
-    "torch",
-    "tqdm",
-]
+dependencies = ["numpy", "pandas", "pyyaml", "torch", "tqdm"]
 
 [project.optional-dependencies]
 dream = ["transformers==4.51.3", "accelerate", "sentencepiece"]
@@ -31,6 +25,3 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
-[tool.ruff]
-line-length = 100

@@ -1,1 +1,1 @@
-"""Prepare and load the shared Universal Dependencies data."""
+"""Shared data preparation and loading."""

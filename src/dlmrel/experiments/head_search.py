@@ -1,1 +1,1 @@
-"""Relation-head search shared by every model."""
+"""Relation-head search."""

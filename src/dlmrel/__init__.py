@@ -1,1 +1,1 @@
-"""Shared tools for linguistic-relation experiments in diffusion language models."""
+"""Shared DLM linguistic-relation tools."""

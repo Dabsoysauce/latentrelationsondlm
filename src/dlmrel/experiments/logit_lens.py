@@ -1,1 +1,1 @@
-"""Layerwise logit-lens analysis."""
+"""Logit-lens analysis."""

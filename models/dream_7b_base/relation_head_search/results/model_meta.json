@@ -1,8 +1,0 @@
-{
-  "name": "Dream-org/Dream-v0-Base-7B",
-  "n_layers": 28,
-  "n_heads": 28,
-  "hidden_size": 3584,
-  "mask_token_id": 151666,
-  "bos_token_id": 151665
-}

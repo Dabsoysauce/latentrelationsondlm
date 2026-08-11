@@ -1,1 +1,1 @@
-"""Confidence intervals and statistical comparisons."""
+"""Statistical analysis."""

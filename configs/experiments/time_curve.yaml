@@ -1,3 +1,2 @@
-relation: object_to_verb
 seeds: [1, 2, 3, 4, 5]
 timesteps: [0, 8, 16, 24, 32, 40, 48, 56]

@@ -1,1 +1,1 @@
-"""Cross-model tables and figures."""
+"""Cross-model comparison."""

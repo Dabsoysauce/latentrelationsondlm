@@ -1,1 +1,1 @@
-"""Standardized plots for every model."""
+"""Standardized plotting."""

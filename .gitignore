@@ -4,17 +4,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .ipynb_checkpoints/
-
-# Downloaded model and dataset caches
 .cache/
 models_cache/
 data/raw/
-
-# Generated run artifacts
-results/**/checkpoints/
-results/**/cache/
-
-# Local environment files
 .env
 .DS_Store
 Thumbs.db

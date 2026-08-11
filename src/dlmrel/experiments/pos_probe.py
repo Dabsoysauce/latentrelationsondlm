@@ -1,1 +1,1 @@
-"""Layerwise part-of-speech probes."""
+"""Part-of-speech probing."""

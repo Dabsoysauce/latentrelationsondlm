@@ -1,1 +1,1 @@
-"""Reusable experiment implementations."""
+"""Shared experiment implementations."""

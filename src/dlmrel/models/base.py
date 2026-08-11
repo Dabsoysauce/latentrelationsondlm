@@ -1,1 +1,1 @@
-"""Common interface implemented by every model adapter."""
+"""Common model-adapter interface."""

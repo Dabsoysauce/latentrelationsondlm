@@ -1,10 +1,2 @@
-relations:
-  - object_to_verb
-  - subject_to_verb
-  - object_adjective_to_noun
-  - subject_adjective_to_noun
-  - object_determiner_to_noun
-  - subject_determiner_to_noun
 seeds: [1, 2, 3, 4, 5]
 max_tokens: 128
-bootstrap_samples: 1000

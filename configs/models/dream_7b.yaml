@@ -1,6 +1,3 @@
 name: dream_7b
 checkpoint: Dream-org/Dream-v0-Base-7B
 adapter: dream
-dtype: bfloat16
-attention_implementation: eager
-trust_remote_code: true
