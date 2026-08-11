@@ -214,8 +214,143 @@ def _assert_pretrained_weights_loaded(backbone, name: str) -> None:
     )
 
 
+class DreamAdapter(torch.nn.Module):
+    mask_free = True
+
+    def __init__(self, model, device: str):
+        super().__init__()
+        self.model = model
+        self.device = device
+
+    def get_embeds(self, input_ids):
+        return self.model.get_input_embeddings()(input_ids)
+
+    def get_logits(self, hidden_state):
+        return self.model.lm_head(hidden_state)
+
+    def get_final_norm(self):
+        return self.model.model.norm
+
+    def get_lm_head(self):
+        return self.model.lm_head
+
+    @torch.no_grad()
+    def forward_attentions(self, input_ids, output_hidden_states: bool = False):
+        out = self.model(
+            input_ids=input_ids,
+            attention_mask=None,
+            output_attentions=True,
+            output_hidden_states=output_hidden_states,
+            return_dict=True,
+        )
+        if getattr(out, "attentions", None) is None:
+            raise RuntimeError(
+                "Dream returned no attention weights; the remote code is "
+                "ignoring output_attentions and every accuracy would be zero. "
+                "Load with attn_implementation='eager'."
+            )
+        if output_hidden_states:
+            return None, out.attentions, out.hidden_states
+        return None, out.attentions
+
+
+def _load_dream(cfg: ModelConfig):
+    import torch as _torch
+    from transformers import AutoModel, AutoTokenizer
+    from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
+    if "default" not in ROPE_INIT_FUNCTIONS and "rope" in ROPE_INIT_FUNCTIONS:
+        ROPE_INIT_FUNCTIONS["default"] = ROPE_INIT_FUNCTIONS["rope"]
+        print("[model] applied RoPE compatibility patch")
+
+    tokenizer = AutoTokenizer.from_pretrained(cfg.name, trust_remote_code=True)
+    dtype = _DTYPES[cfg.dtype]
+
+    try:
+        backbone = AutoModel.from_pretrained(
+            cfg.name,
+            torch_dtype=dtype,
+            trust_remote_code=True,
+            device_map="auto",
+            attn_implementation=cfg.attn_implementation,
+        ).eval()
+        print(f"[model] loaded with attn_implementation={cfg.attn_implementation}")
+    except (TypeError, ValueError) as exc:
+        print(f"[model] eager kwarg rejected ({exc}); using remote-code default")
+        backbone = AutoModel.from_pretrained(
+            cfg.name, torch_dtype=dtype, trust_remote_code=True, device_map="auto"
+        ).eval()
+
+    model = DreamAdapter(backbone, cfg.device)
+    model.eval()
+
+    if tokenizer.mask_token_id is None:
+        raise ValueError(
+            f"{cfg.name} exposes no mask token; the diffusion schedule needs one"
+        )
+
+    hf_config = backbone.config
+    meta = {
+        "name": cfg.name,
+        "n_layers": hf_config.num_hidden_layers,
+        "n_heads": hf_config.num_attention_heads,
+        "hidden_size": hf_config.hidden_size,
+        "mask_token_id": tokenizer.mask_token_id,
+        "bos_token_id": tokenizer.bos_token_id,
+    }
+    print(
+        f"[model] {cfg.name}: {meta['n_layers']} layers x {meta['n_heads']} heads "
+        f"({meta['n_layers'] * meta['n_heads']} heads searched per relation)"
+    )
+
+    probe_ids = _torch.tensor(
+        [
+            [tokenizer.bos_token_id]
+            + tokenizer.encode("The cat sat on the mat.", add_special_tokens=False)
+        ],
+        device=cfg.device,
+    )
+    _, attentions = model.forward_attentions(probe_ids)
+    if not attentions or attentions[0] is None:
+        raise RuntimeError("Dream returned no attention weights at load time")
+    return model, tokenizer, meta
+
+
+def final_norm_module(model):
+    """The norm applied after the last block, needed before any lm_head call.
+
+    `output_hidden_states` returns intermediate layers *before* this norm, so
+    projecting them through the head without it gives noise, not a logit lens.
+    """
+    if hasattr(model, "get_final_norm"):
+        return model.get_final_norm()
+    body = getattr(model, "denoise_model", None)
+    if body is None:
+        raise RuntimeError(f"no denoise_model on {type(model).__name__}")
+    for attr in ("norm", "ln_f"):
+        norm = getattr(body, attr, None)
+        if isinstance(norm, torch.nn.Module):
+            return norm
+    raise RuntimeError(
+        f"no final norm found on {type(body).__name__}; add it to "
+        "final_norm_module before running the logit lens"
+    )
+
+
+def lm_head_module(model):
+    if hasattr(model, "get_lm_head"):
+        return model.get_lm_head()
+    head = getattr(model, "lm_head", None)
+    if not isinstance(head, torch.nn.Module):
+        raise TypeError(f"no lm_head module on {type(model).__name__}")
+    return head
+
+
 def load_model(cfg: ModelConfig, repo_root: str | Path = "third_party"):
     """Return `(model, tokenizer, meta)` ready for attention extraction."""
+    if cfg.family == "dream":
+        return _load_dream(cfg)
+
     ensure_diffullama_repo(repo_root)
 
     try:

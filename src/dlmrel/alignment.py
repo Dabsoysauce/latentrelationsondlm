@@ -51,6 +51,49 @@ def find_char_spans(text: str, forms: list[str]) -> list[tuple[int, int]] | None
     return spans
 
 
+def manual_token_offsets(
+    tokenizer, ids: list[int], text: str
+) -> list[tuple[int, int]]:
+    """Per-token character offsets for a tokenizer with no offset mapping.
+
+    A token that cannot be placed gets a zero-width span, which no word
+    overlaps, so it drops the word from the alignment rather than aligning it
+    to the wrong position.
+    """
+    offsets: list[tuple[int, int]] = []
+    cursor = 0
+    for tid in ids:
+        piece = tokenizer.decode([tid]).strip()
+        if not piece:
+            offsets.append((cursor, cursor))
+            continue
+        idx = text.find(piece, cursor)
+        if idx < 0:
+            offsets.append((cursor, cursor))
+            continue
+        offsets.append((idx, idx + len(piece)))
+        cursor = idx + len(piece)
+    return offsets
+
+
+def token_offsets(tokenizer, text: str) -> list[tuple[int, int]]:
+    """Per-token character offsets, falling back to a manual scan."""
+    fast = getattr(tokenizer, "_dlmrel_fast_offsets", None)
+    if fast is None:
+        try:
+            tokenizer("probe", return_offsets_mapping=True)
+            fast = True
+        except Exception:  # noqa: BLE001
+            fast = False
+        tokenizer._dlmrel_fast_offsets = fast
+
+    if fast:
+        enc = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+        return enc["offset_mapping"]
+    ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+    return manual_token_offsets(tokenizer, ids, text)
+
+
 def align_words_to_tokens(
     text: str,
     char_spans: list[tuple[int, int]],
@@ -62,8 +105,7 @@ def align_words_to_tokens(
     Token indices are shifted by +1 when `include_bos`, because the experiment
     prepends BOS to every sequence.
     """
-    enc = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
-    offsets = enc["offset_mapping"]
+    offsets = token_offsets(tokenizer, text)
     shift = 1 if include_bos else 0
 
     word_to_tokens: dict[int, list[int]] = {}

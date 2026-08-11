@@ -81,7 +81,7 @@ class TreebankConfig:
 @dataclass
 class ModelConfig:
     name: str = "diffusionfamily/diffullama"
-    family: str = "diffullama"  # "diffullama" | "diffugpt"
+    family: str = "diffullama"  # "diffullama" | "diffugpt" | "dream"
     dtype: str = "bfloat16"
     device: str = "cuda"
     # Only eager attention returns attention weights; sdpa and

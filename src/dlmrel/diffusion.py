@@ -36,6 +36,9 @@ def forward_with_attentions(model, input_ids, attention_mask):
 
     `attentions[layer]` has shape [batch, heads, seq_len, seq_len].
     """
+    if getattr(model, "mask_free", False):
+        return model.forward_attentions(input_ids)
+
     embeds = model.get_embeds(input_ids)
     outputs = model.denoise_model(
         inputs_embeds=embeds,
@@ -131,11 +134,16 @@ def attentions_at_time(
     include_bos: bool = True,
 ):
     """Return `(attentions, state)` for one sentence at one timestep."""
-    from model import get_anneal_attn_mask
-
     state = state_at_time(
         model, tokenizer, text, diffusion_time, steps, seed, include_bos
     )
+
+    if getattr(model, "mask_free", False):
+        _, attentions = forward_with_attentions(model, state.input_ids, None)
+        return attentions, state
+
+    from model import get_anneal_attn_mask
+
     embeds = model.get_embeds(state.input_ids)
     attn_mask = get_anneal_attn_mask(
         seq_len=state.input_ids.shape[1],
@@ -146,6 +154,48 @@ def attentions_at_time(
     )
     _, attentions = forward_with_attentions(model, state.input_ids, attn_mask)
     return attentions, state
+
+
+@torch.no_grad()
+def states_at_time(
+    model,
+    tokenizer,
+    text: str,
+    diffusion_time: int,
+    steps: int = 64,
+    seed: int = 42,
+    include_bos: bool = True,
+):
+    """Return `(attentions, hidden_states, state)` for one sentence."""
+    state = state_at_time(
+        model, tokenizer, text, diffusion_time, steps, seed, include_bos
+    )
+
+    if getattr(model, "mask_free", False):
+        _, attentions, hidden = model.forward_attentions(
+            state.input_ids, output_hidden_states=True
+        )
+        return attentions, hidden, state
+
+    from model import get_anneal_attn_mask
+
+    embeds = model.get_embeds(state.input_ids)
+    attn_mask = get_anneal_attn_mask(
+        seq_len=state.input_ids.shape[1],
+        bsz=state.input_ids.shape[0],
+        dtype=embeds.dtype,
+        device=state.input_ids.device,
+        attn_mask_ratio=1.0,
+    )
+    outputs = model.denoise_model(
+        inputs_embeds=embeds,
+        attention_mask=attn_mask,
+        output_attentions=True,
+        output_hidden_states=True,
+        return_dict=True,
+        use_cache=False,
+    )
+    return outputs.attentions, outputs.hidden_states, state
 
 
 def receiver_predictions(

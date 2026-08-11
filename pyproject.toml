@@ -28,6 +28,14 @@ gpu = [
     "sentencepiece>=0.1.99",
     "huggingface-hub>=0.23,<0.37",
 ]
+# Deliberately incompatible with `gpu` above: the two families cannot share a
+# runtime.
+dream = [
+    "torch>=2.1",
+    "transformers==4.51.3",
+    "accelerate>=0.30",
+    "safetensors>=0.4",
+]
 dev = ["pytest>=7.4", "ruff>=0.5"]
 
 [project.scripts]

@@ -18,6 +18,20 @@ from .relations import Example, build_examples
 from .treebank import load_treebanks, split_sentences
 
 
+def load_tokenizer(name: str):
+    """AutoTokenizer, retrying with remote code for models that require it."""
+    from transformers import AutoTokenizer
+
+    try:
+        return AutoTokenizer.from_pretrained(name)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[splits] {name}: plain tokenizer load failed "
+            f"({type(exc).__name__}); retrying with trust_remote_code=True"
+        )
+        return AutoTokenizer.from_pretrained(name, trust_remote_code=True)
+
+
 def restrict_to_texts(examples: list[Example], texts: set[str]) -> list[Example]:
     """Keep only examples whose sentence is in `texts`, preserving pool order.
 
@@ -57,8 +71,6 @@ def common_pool_texts(cfg: Config, sentences) -> set[str]:
     import hashlib
     import json
 
-    from transformers import AutoTokenizer
-
     tc = cfg.treebank
     fingerprint = "|".join(
         sorted(tc.common_pool_models)
@@ -82,7 +94,7 @@ def common_pool_texts(cfg: Config, sentences) -> set[str]:
     for name in sorted(tc.common_pool_models):
         examples = build_examples(
             sentences,
-            AutoTokenizer.from_pretrained(name),
+            load_tokenizer(name),
             tc,
             include_bos=cfg.diffusion.include_bos,
             tag=f"pool[{name}]",

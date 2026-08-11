@@ -28,13 +28,11 @@ def _out(cfg: Config) -> Path:
 
 
 def cmd_data(cfg: Config) -> None:
-    from transformers import AutoTokenizer
-
     from .relations import relations_to_records
-    from .splits import build_all_splits
+    from .splits import build_all_splits, load_tokenizer
 
     out = _out(cfg)
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model.name)
+    tokenizer = load_tokenizer(cfg.model.name)
 
     # Deliberately the same call the GPU stages use to rebuild their splits. It
     # used to be duplicated here, which meant a change to one path silently did
