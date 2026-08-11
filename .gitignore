@@ -1,0 +1,38 @@
+# Data and model artifacts are re-downloadable; results are re-derivable.
+data/
+third_party/
+results/**/
+!results/.gitkeep
+
+# Keep small analysis outputs that the README cites.
+!results/**/head_vs_null.csv
+!results/**/offset_null.csv
+!results/**/config.yaml
+
+# Scratch figure output at the repo root is a build artifact. The leading
+# slash matters: an unanchored `figures/` would also swallow the curated
+# copies under cross_model_analysis/figures/, which are checked in.
+/figures/
+/figures-dream/
+
+# Belongs to the open figures PR (branch `figures`); not duplicated here.
+/scripts/make_figures.py
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+.DS_Store
+
+# Colab upload bundle and its unpacked copy are build artifacts of this repo.
+*.zip
+dlmrel-colab/
+/figures-probes/
