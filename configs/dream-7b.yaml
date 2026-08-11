@@ -1,0 +1,63 @@
+# Dream-7B (28L x 28H = 784 heads) over the same protocol as the other models.
+#
+# Dream is the second *architecture* (Qwen2-based, natively bidirectional),
+# not just a second scale. Two things distinguish this config:
+#
+#   1. transformers version. Dream needs >=4.51; the DiffuLLaMA families need
+#      exactly 4.44.2. The pins are mutually exclusive, so this config cannot
+#      run in the same environment as the other two.
+#   2. The common pool now lists all three models, which changes the pool cache
+#      key. If Dream's tokenizer admits every sentence the old two-model pool
+#      admitted, the splits are unchanged; otherwise the other models must be
+#      re-scored on the new pool before any cross-model table is built.
+#
+# BOS note: Dream's tokenizer does not prepend BOS, but the vocab has one
+# (<|beginoftext|>). include_bos: true prepends it explicitly so position 0 is
+# a dedicated attention-sink slot, exactly as in the other two models. The
+# smoke test (notebooks/smoke_test_dream7b.ipynb) measured 52% attention mass
+# on position 0, so exclude_bos: true is correction, not distortion.
+
+treebank:
+  treebanks:
+    - UD_English-EWT
+  cache_dir: data/ud
+  n_select: 4000
+  n_dev: 1000
+  n_test: 1000
+  max_seq_len: 128
+  min_seq_len: 4
+  shuffle: true
+  seed: 42
+  skip_multiword: true
+  require_full_alignment: true
+  # Score all models on identical sentences.
+  common_pool_models:
+    - diffusionfamily/diffugpt-s
+    - diffusionfamily/diffullama
+    - Dream-org/Dream-v0-Base-7B
+
+model:
+  name: Dream-org/Dream-v0-Base-7B
+  family: dream
+  dtype: bfloat16
+  device: cuda
+  # Must stay "eager": sdpa and flash_attention_2 return no attention weights.
+  attn_implementation: eager
+
+diffusion:
+  steps: 64
+  seed: 42
+  seeds: [42, 43, 44, 45, 46]
+  include_bos: true
+  exclude_bos: true
+  exclude_self: true
+  attender_token: last
+  min_masked_positions: 25
+
+analysis:
+  offset_range: [-15, 15]
+  n_bootstrap: 10000
+  ci: 0.95
+  distance_bins: [1, 2, 3, 5, 8, 100]
+
+out_dir: results/dream-7b-ewt
