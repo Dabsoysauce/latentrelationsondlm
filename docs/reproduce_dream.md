@@ -1,12 +1,12 @@
 # Reproducing the Dream-7B results
 
-This walks through running every Dream-7B experiment end to end and checking
-your numbers against the recorded run.
+How to run every Dream-7B experiment and check your numbers against the
+recorded run.
 
-> **Current source of truth:** the full working pipeline lives on the
-> `dream-7b` branch while the shared-structure port is in progress. Reproduce
-> from that branch until the port lands on `main`. The commands below are the
-> same either way; only the file paths change.
+> **Which branch to use:** the full working pipeline is on the `dream-7b`
+> branch. The shared-structure port isn't finished yet, so run from `dream-7b`
+> until it lands on `main`. The commands are the same either way; only the
+> file paths change.
 
 ## What you should get
 
