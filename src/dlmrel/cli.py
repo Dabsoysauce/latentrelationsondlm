@@ -123,7 +123,20 @@ def cmd_curve(cfg: Config) -> None:
     model, tokenizer, _ = load_model(cfg.model)
     examples = examples_for_split(cfg, tokenizer, "test")
 
-    raw = masked_state_curve(model, tokenizer, examples, heads, cfg.diffusion)
+    stride = max(1, cfg.diffusion.timestep_stride)
+    timesteps = list(range(0, cfg.diffusion.steps, stride))
+    if cfg.diffusion.n_curve_sentences is not None:
+        examples = examples[: cfg.diffusion.n_curve_sentences]
+
+    passes = len(cfg.diffusion.seeds) * len(timesteps) * len(examples)
+    print(
+        f"[curve] {len(cfg.diffusion.seeds)} seeds x {len(timesteps)} timesteps "
+        f"x {len(examples)} sentences = {passes} forward passes"
+    )
+
+    raw = masked_state_curve(
+        model, tokenizer, examples, heads, cfg.diffusion, timesteps=timesteps
+    )
     raw.to_csv(out / "curve_raw.csv", index=False)
 
     agg = aggregate_curve(raw, cfg.diffusion.min_masked_positions)

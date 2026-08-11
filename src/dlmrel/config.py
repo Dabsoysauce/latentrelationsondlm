@@ -104,6 +104,10 @@ class DiffusionConfig:
     # Minimum number of still-masked positions for a frame to count toward the
     # masked-state statistic.
     min_masked_positions: int = 25
+    # `curve` costs seeds x (steps / stride) x sentences forward passes. At the
+    # defaults that is 320,000, so both knobs exist to make it affordable.
+    timestep_stride: int = 1
+    n_curve_sentences: int | None = None
 
 
 @dataclass
