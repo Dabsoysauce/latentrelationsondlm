@@ -1,0 +1,6 @@
+original_path,archived_path
+results/cross_model,results/reference_legacy/pre_rigorous_6e5aaec/cross_model
+results/diffugpt,results/reference_legacy/pre_rigorous_6e5aaec/diffugpt
+results/diffullama_7b,results/reference_legacy/pre_rigorous_6e5aaec/diffullama_7b
+results/dream_7b,results/reference_legacy/pre_rigorous_6e5aaec/dream_7b
+results/llada_8b,results/reference_legacy/pre_rigorous_6e5aaec/llada_8b

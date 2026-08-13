@@ -1,0 +1,13 @@
+{
+  "schema_version": "legacy-provenance-v1",
+  "archived_from_commit": "6e5aaec772f942573add5d211ab10edf683d69bd",
+  "archive_purpose": "historical regression reference",
+  "confirmatory": false,
+  "model_revisions": "unknown/not recoverable",
+  "tokenizer_revisions": "unknown/not recoverable",
+  "ud_release_or_commits": "unknown/not recoverable",
+  "manifest_hashes": "unknown/not recoverable",
+  "environment": "unknown/not recoverable",
+  "known_protocol_issue": "official UD splits were merged and resplit",
+  "original_paths_file": "original_paths.csv"
+}
