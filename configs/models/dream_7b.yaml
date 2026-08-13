@@ -1,3 +1,17 @@
-name: dream_7b
-checkpoint: Dream-org/Dream-v0-Base-7B
-adapter: dream
+id: dream_7b
+name: Dream-org/Dream-v0-Base-7B
+family: dream
+revision: 6572adb5535263e4d1a337b56942ba48b6dee2a9
+tokenizer_revision: 6572adb5535263e4d1a337b56942ba48b6dee2a9
+remote_code_revision: 6572adb5535263e4d1a337b56942ba48b6dee2a9
+dtype: bfloat16
+device: cuda
+attn_implementation: eager
+capabilities:
+  logits: true
+  hidden_states: true
+  attentions: true
+  native_timestep: false
+  head_residuals: false
+  head_ablation: false
+  native_generation: true

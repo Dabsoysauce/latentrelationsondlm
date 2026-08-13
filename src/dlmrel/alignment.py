@@ -9,7 +9,17 @@ and therefore diverged from the DiffuGPT path it was meant to replicate.
 
 from __future__ import annotations
 
+import unicodedata
+from dataclasses import dataclass
+
 from conllu.models import TokenList
+
+
+@dataclass(frozen=True)
+class AlignmentDiagnostics:
+    method: str
+    success: bool
+    reason: str
 
 
 def is_syntactic_token(token) -> bool:
@@ -51,33 +61,45 @@ def find_char_spans(text: str, forms: list[str]) -> list[tuple[int, int]] | None
     return spans
 
 
-def manual_token_offsets(
-    tokenizer, ids: list[int], text: str
-) -> list[tuple[int, int]]:
-    """Per-token character offsets for a tokenizer with no offset mapping.
+def manual_token_offsets(tokenizer, ids: list[int], text: str) -> list[tuple[int, int]]:
+    """Fail-closed cumulative decode fallback without substring guessing.
 
-    A token that cannot be placed gets a zero-width span, which no word
-    overlaps, so it drops the word from the alignment rather than aligning it
-    to the wrong position.
+    Cumulative decoding preserves byte-level whitespace and Unicode composition
+    better than decoding one token and stripping it. Every decoded prefix must
+    match the normalized text prefix exactly; otherwise remaining tokens receive
+    zero-width spans and the sentence is excluded by full-alignment checks.
     """
     offsets: list[tuple[int, int]] = []
-    cursor = 0
-    for tid in ids:
-        piece = tokenizer.decode([tid]).strip()
-        if not piece:
-            offsets.append((cursor, cursor))
+    normalized_text = unicodedata.normalize("NFC", text)
+    previous = ""
+    failed = False
+    for end in range(1, len(ids) + 1):
+        if failed:
+            offsets.append((len(previous), len(previous)))
             continue
-        idx = text.find(piece, cursor)
-        if idx < 0:
-            offsets.append((cursor, cursor))
+        try:
+            decoded = tokenizer.decode(ids[:end], clean_up_tokenization_spaces=False)
+        except TypeError:
+            decoded = tokenizer.decode(ids[:end])
+        decoded = unicodedata.normalize("NFC", decoded)
+        if not decoded.startswith(previous) or not normalized_text.startswith(decoded):
+            failed = True
+            offsets.append((len(previous), len(previous)))
             continue
-        offsets.append((idx, idx + len(piece)))
-        cursor = idx + len(piece)
+        start, stop = len(previous), len(decoded)
+        while start < stop and normalized_text[start].isspace():
+            start += 1
+        while stop > start and normalized_text[stop - 1].isspace():
+            stop -= 1
+        offsets.append((start, stop))
+        previous = decoded
     return offsets
 
 
-def token_offsets(tokenizer, text: str) -> list[tuple[int, int]]:
-    """Per-token character offsets, falling back to a manual scan."""
+def token_offsets_with_diagnostics(
+    tokenizer, text: str
+) -> tuple[list[tuple[int, int]], AlignmentDiagnostics]:
+    """Return offsets and a structured audit reason."""
     fast = getattr(tokenizer, "_dlmrel_fast_offsets", None)
     if fast is None:
         try:
@@ -86,12 +108,20 @@ def token_offsets(tokenizer, text: str) -> list[tuple[int, int]]:
         except Exception:  # noqa: BLE001
             fast = False
         tokenizer._dlmrel_fast_offsets = fast
-
     if fast:
-        enc = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
-        return enc["offset_mapping"]
+        encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+        offsets = [tuple(pair) for pair in encoding["offset_mapping"]]
+        return offsets, AlignmentDiagnostics("offset_mapping", True, "ok")
     ids = tokenizer(text, add_special_tokens=False)["input_ids"]
-    return manual_token_offsets(tokenizer, ids, text)
+    offsets = manual_token_offsets(tokenizer, ids, text)
+    success = all(stop > start for start, stop in offsets)
+    reason = "ok" if success else "cumulative_decode_prefix_mismatch"
+    return offsets, AlignmentDiagnostics("cumulative_decode", success, reason)
+
+
+def token_offsets(tokenizer, text: str) -> list[tuple[int, int]]:
+    """Per-token character offsets, falling back to a manual scan."""
+    return token_offsets_with_diagnostics(tokenizer, text)[0]
 
 
 def align_words_to_tokens(

@@ -30,6 +30,8 @@ def logit_lens(
     head = model.get_lm_head()
 
     correct: dict[tuple[int, int, bool], int] = defaultdict(int)
+    top5: dict[tuple[int, int, bool], int] = defaultdict(int)
+    reciprocal_rank: dict[tuple[int, int, bool], float] = defaultdict(float)
     seen: dict[tuple[int, int, bool], int] = defaultdict(int)
     n_depths = 0
 
@@ -44,9 +46,7 @@ def logit_lens(
                 seed=cfg.seed,
                 include_bos=cfg.include_bos,
             )
-            true_ids, _ = tokenize(
-                tokenizer, example.text, state.input_ids.device, cfg.include_bos
-            )
+            true_ids, _ = tokenize(tokenizer, example.text, state.input_ids.device, cfg.include_bos)
             if true_ids.shape[1] != state.input_ids.shape[1]:
                 continue
 
@@ -55,12 +55,17 @@ def logit_lens(
 
             for depth in range(n_depths):
                 h = _depth_hidden(hidden_states, depth, norm)
-                pred = head(h)[0].argmax(dim=-1)
+                logits = head(h)[0].float()
+                order = logits.argsort(dim=-1, descending=True)
+                pred = order[:, 0]
                 hit = (pred == true_ids[0]).cpu().numpy()
                 for pos in range(len(visible)):
                     key = (t, depth, bool(visible[pos]))
                     seen[key] += 1
                     correct[key] += int(hit[pos])
+                    rank = int((order[pos] == true_ids[0, pos]).nonzero()[0]) + 1
+                    top5[key] += int(rank <= 5)
+                    reciprocal_rank[key] += 1.0 / rank
 
             if log_every and (i + 1) % log_every == 0:
                 print(f"[logit-lens] t={t}: {i + 1}/{len(examples)} sentences", flush=True)
@@ -78,6 +83,8 @@ def logit_lens(
                         "depth": depth,
                         "position_state": "visible" if vis else "masked",
                         "accuracy": correct[(t, depth, vis)] / n,
+                        "top5_accuracy": top5[(t, depth, vis)] / n,
+                        "mrr": reciprocal_rank[(t, depth, vis)] / n,
                         "n_positions": n,
                     }
                 )

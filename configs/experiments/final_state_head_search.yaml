@@ -1,10 +1,10 @@
-id: masked_pos_probe
-type: pos_probe
+id: final_state_head_search
+type: head_search
 track: exploratory_extensions
-trajectory: teacher_forced_gold
-steps: 64
-normalized_progress: [0.5]
-seeds: [42, 43, 44, 45, 46]
+trajectory: static_final
+steps: 1
+normalized_progress: [1.0]
+seeds: [42]
 scoring:
   attender_rows: mean
   receiver_span: sum
@@ -13,5 +13,5 @@ scoring:
   top_k: 5
   tie_break: layer_then_head
   primary_relation: object_to_verb
-  primary_visibility: both_masked
-shard_size: 50
+  primary_visibility: both_visible
+shard_size: 100

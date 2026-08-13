@@ -7,6 +7,7 @@ from dlmrel.alignment import (
     find_char_spans,
     manual_token_offsets,
     token_offsets,
+    token_offsets_with_diagnostics,
 )
 
 
@@ -33,6 +34,15 @@ def test_unplaceable_piece_gets_a_zero_width_span():
     tok = _SlowTokenizer(["The", " zzz", " cooked"])
     offsets = manual_token_offsets(tok, [0, 1, 2], "The chef cooked")
     assert offsets[1][0] == offsets[1][1]
+
+
+def test_cumulative_fallback_fails_closed_without_later_substring_guessing():
+    tok = _SlowTokenizer(["The", " wrong", " chef"])
+    offsets, diagnostic = token_offsets_with_diagnostics(tok, "The chef chef")
+    assert offsets[1][0] == offsets[1][1]
+    assert offsets[2][0] == offsets[2][1]
+    assert not diagnostic.success
+    assert diagnostic.reason == "cumulative_decode_prefix_mismatch"
 
 
 def test_token_offsets_falls_back_when_mapping_unavailable():

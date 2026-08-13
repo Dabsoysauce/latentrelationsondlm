@@ -62,9 +62,7 @@ def test_adjective_to_noun_is_adjacent(sentence):
 
 def test_determiner_to_noun_is_not_always_adjacent(sentence):
     distances = {
-        rel.word_distance
-        for rel in relations_of(sentence)
-        if rel.relation.endswith("_det_to_noun")
+        rel.word_distance for rel in relations_of(sentence) if rel.relation.endswith("_det_to_noun")
     }
     assert distances == {2}
 
@@ -108,8 +106,14 @@ class TestCommonPool:
         from dlmrel.relations import Example
 
         return Example(
-            text=text, tokens=[], upos=[], deprel=[], head=[],
-            word_to_tokens={}, relations=[], seq_len=4,
+            text=text,
+            tokens=[],
+            upos=[],
+            deprel=[],
+            head=[],
+            word_to_tokens={},
+            relations=[],
+            seq_len=4,
         )
 
     def test_keeps_only_common_sentences(self):

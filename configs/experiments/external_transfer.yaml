@@ -1,6 +1,6 @@
-id: attention_entropy_over_time
-type: attention_entropy
-track: exploratory_extensions
+id: ewt_locked_transfer
+type: head_search
+track: external_treebank_transfer
 trajectory: teacher_forced_gold
 steps: 64
 normalized_progress: [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
@@ -14,4 +14,4 @@ scoring:
   tie_break: layer_then_head
   primary_relation: object_to_verb
   primary_visibility: both_masked
-shard_size: 50
+shard_size: 100

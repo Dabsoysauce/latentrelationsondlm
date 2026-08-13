@@ -98,10 +98,22 @@ def run(model, tokenizer, cfg: Config, out: Path) -> None:
     if cfg.diffusion.n_probe_sentences is not None:
         examples = examples[: cfg.diffusion.n_probe_sentences]
 
-    table = attention_entropy(model, tokenizer, examples, cfg.diffusion)
+    if cfg.diffusion.timesteps:
+        timesteps = cfg.diffusion.timesteps
+    else:
+        timesteps = sorted(
+            {
+                round(progress * (cfg.diffusion.steps - 1))
+                for progress in (0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0)
+            }
+        )
+    tables = [
+        attention_entropy(model, tokenizer, examples, cfg.diffusion, timestep)
+        for timestep in timesteps
+    ]
+    table = pd.concat([item for item in tables if not item.empty], ignore_index=True)
+    table["normalized_progress"] = table["diffusion_time"] / max(cfg.diffusion.steps - 1, 1)
     table.to_csv(out / "attention_entropy.csv", index=False)
     print(
-        table.groupby("layer")[["entropy_norm", "entropy_no_sink", "sink_mass"]]
-        .mean()
-        .to_string()
+        table.groupby("layer")[["entropy_norm", "entropy_no_sink", "sink_mass"]].mean().to_string()
     )

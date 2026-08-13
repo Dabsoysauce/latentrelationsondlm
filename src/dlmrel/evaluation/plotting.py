@@ -44,9 +44,7 @@ def _save(fig, out: Path, name: str) -> None:
     print(f"  wrote {out / name}.png")
 
 
-def fig_receiver_over_time(
-    curve_raw: Path, offset_null: Path, out: Path, name: str
-) -> None:
+def fig_receiver_over_time(curve_raw: Path, offset_null: Path, out: Path, name: str) -> None:
     raw = pd.read_csv(curve_raw)
     relations = ["object_to_verb", "subject_to_verb"]
 
@@ -58,14 +56,21 @@ def fig_receiver_over_time(
             continue
         allc = sub.groupby("timestep")["correct"].mean()
         ax.plot(
-            allc.index, allc.values, color=colors[rel], linewidth=1.6,
+            allc.index,
+            allc.values,
+            color=colors[rel],
+            linewidth=1.6,
             label=f"{RELATION_LABEL[rel]}",
         )
         masked = sub[sub["both_endpoints_masked"]]
         g = masked.groupby("timestep")["correct"].agg(["mean", "count"])
         g = g[g["count"] >= 25]
         ax.plot(
-            g.index, g["mean"], color=colors[rel], linewidth=1.4, linestyle="--",
+            g.index,
+            g["mean"],
+            color=colors[rel],
+            linewidth=1.4,
+            linestyle="--",
             label=f"{RELATION_LABEL[rel]} (masked only)",
         )
 
@@ -73,7 +78,10 @@ def fig_receiver_over_time(
         nulls = pd.read_csv(offset_null).set_index("relation")
         rnd = float(nulls.loc["object_to_verb", "null_test_acc"])
         ax.axhline(
-            rnd, color="0.4", linestyle=":", linewidth=1.0,
+            rnd,
+            color="0.4",
+            linestyle=":",
+            linewidth=1.0,
             label=f"fixed-offset null ({rnd:.2f})",
         )
 
@@ -90,17 +98,28 @@ def fig_pos_probe(pos_probe: Path, out: Path, name: str, title: str) -> None:
 
     fig, ax = plt.subplots(figsize=(5.0, 3.6))
     ax.plot(
-        t["depth"], t["accuracy"], "o-", color="C0", linewidth=1.6,
-        markersize=4, label="linear probe",
+        t["depth"],
+        t["accuracy"],
+        "o-",
+        color="C0",
+        linewidth=1.6,
+        markersize=4,
+        label="linear probe",
     )
     if "lexical_baseline" in t:
         ax.axhline(
-            t["lexical_baseline"].iloc[0], color="C1", linestyle="--", linewidth=1.2,
+            t["lexical_baseline"].iloc[0],
+            color="C1",
+            linestyle="--",
+            linewidth=1.2,
             label=f"per-token-type tag ({t['lexical_baseline'].iloc[0]:.2f})",
         )
     if "majority_baseline" in t:
         ax.axhline(
-            t["majority_baseline"].iloc[0], color="0.4", linestyle=":", linewidth=1.0,
+            t["majority_baseline"].iloc[0],
+            color="0.4",
+            linestyle=":",
+            linewidth=1.0,
             label=f"majority class ({t['majority_baseline'].iloc[0]:.2f})",
         )
 
@@ -120,7 +139,10 @@ def fig_logit_lens(logit_lens: Path, out: Path, name: str, title: str) -> None:
     for i, dt in enumerate(sorted(masked["diffusion_time"].unique())):
         sub = masked[masked["diffusion_time"] == dt].sort_values("depth")
         ax.plot(
-            sub["depth"], sub["accuracy"], linewidth=1.6, color=f"C{i}",
+            sub["depth"],
+            sub["accuracy"],
+            linewidth=1.6,
+            color=f"C{i}",
             label=f"t = {dt}",
         )
 
@@ -146,9 +168,8 @@ def attention_heatmaps(
     fig, axes = plt.subplots(1, n, figsize=(2.1 * n, 2.4), squeeze=False)
     vmax = max(float(np.asarray(m).max()) for m in matrices)
     im = None
-    for ax, mat, toks, t, masked in zip(
-        axes[0], matrices, token_rows, timesteps, n_masked
-    ):
+    rows = zip(axes[0], matrices, token_rows, timesteps, n_masked, strict=False)
+    for ax, mat, toks, t, masked in rows:
         mat = np.asarray(mat)
         im = ax.imshow(mat, cmap="viridis", vmin=0.0, vmax=vmax, aspect="auto")
         ax.set_title(f"t={t}\n{masked} masked", fontsize=7)
@@ -205,12 +226,22 @@ def fig_attention_entropy(entropy: Path, out: Path, name: str, title: str) -> No
 
     fig, ax = plt.subplots(figsize=(5.0, 3.6))
     ax.plot(
-        g.index, g["entropy_norm"], "o-", color="C0", linewidth=1.6,
-        markersize=3, label="normalised entropy",
+        g.index,
+        g["entropy_norm"],
+        "o-",
+        color="C0",
+        linewidth=1.6,
+        markersize=3,
+        label="normalised entropy",
     )
     ax.plot(
-        g.index, g["sink_mass"], "s-", color="C1", linewidth=1.6,
-        markersize=3, label="attention mass on position 0",
+        g.index,
+        g["sink_mass"],
+        "s-",
+        color="C1",
+        linewidth=1.6,
+        markersize=3,
+        label="attention mass on position 0",
     )
     ax.set_xlabel("Layer")
     ax.set_ylabel("Mean over heads")

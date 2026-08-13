@@ -31,7 +31,4 @@ class TestWrapperKeyMap:
         assert _wrapper_key_map("optimizer.state", "diffugpt") is None
 
     def test_positional_embedding_survives_the_rewrite(self):
-        assert (
-            _wrapper_key_map("denoise_model.wpe.weight", "diffugpt")
-            == "transformer.wpe.weight"
-        )
+        assert _wrapper_key_map("denoise_model.wpe.weight", "diffugpt") == "transformer.wpe.weight"

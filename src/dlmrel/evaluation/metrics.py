@@ -60,13 +60,11 @@ def _as_list(value) -> list[int]:
     return list(value)
 
 
-def offset_accuracy(
-    df: pd.DataFrame, k: int, attender_token: str = "last"
-) -> float:
+def offset_accuracy(df: pd.DataFrame, k: int, attender_token: str = "last") -> float:
     anchors, targets = _anchors_and_targets(df, attender_token)
     if len(anchors) == 0:
         return float("nan")
-    return float(np.mean([(a + k) in t for a, t in zip(anchors, targets)]))
+    return float(np.mean([(a + k) in t for a, t in zip(anchors, targets, strict=False)]))
 
 
 def fit_offset_null(
@@ -112,11 +110,9 @@ def bootstrap_ci(
     )
 
 
-def offset_correctness(
-    df: pd.DataFrame, k: int, attender_token: str = "last"
-) -> np.ndarray:
+def offset_correctness(df: pd.DataFrame, k: int, attender_token: str = "last") -> np.ndarray:
     anchors, targets = _anchors_and_targets(df, attender_token)
-    return np.array([(a + k) in t for a, t in zip(anchors, targets)], dtype=float)
+    return np.array([(a + k) in t for a, t in zip(anchors, targets, strict=False)], dtype=float)
 
 
 def build_null_table(
@@ -141,9 +137,7 @@ def build_null_table(
                 "k": null.k,
                 "null_fit_acc": null.fit_accuracy,
                 "n_fit": null.n_fit,
-                "null_test_acc": (
-                    float(correct.mean()) if correct.size else float("nan")
-                ),
+                "null_test_acc": (float(correct.mean()) if correct.size else float("nan")),
                 "null_ci_lo": lo,
                 "null_ci_hi": hi,
                 "n_test": int(correct.size),

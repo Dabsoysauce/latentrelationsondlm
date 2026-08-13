@@ -1,2 +1,17 @@
-name: diffugpt
-adapter: diffugpt
+id: diffugpt_s
+name: diffusionfamily/diffugpt-s
+family: diffugpt
+revision: 391d9850148c0beda355a8874bea958a40164c74
+tokenizer_revision: 391d9850148c0beda355a8874bea958a40164c74
+remote_code_revision: c17e897f6476c174b4623da594e4c65554f1613d
+dtype: bfloat16
+device: cuda
+attn_implementation: eager
+capabilities:
+  logits: true
+  hidden_states: true
+  attentions: true
+  native_timestep: true
+  head_residuals: false
+  head_ablation: false
+  native_generation: true

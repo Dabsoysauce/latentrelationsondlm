@@ -1,0 +1,17 @@
+id: fake
+name: fake
+family: fake
+revision: local-v1
+tokenizer_revision: local-v1
+remote_code_revision: null
+dtype: float32
+device: cpu
+attn_implementation: eager
+capabilities:
+  logits: true
+  hidden_states: true
+  attentions: true
+  native_timestep: true
+  head_residuals: true
+  head_ablation: true
+  native_generation: false

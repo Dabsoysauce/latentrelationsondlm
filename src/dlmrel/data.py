@@ -67,7 +67,7 @@ def download_conllu(repo: str, split: str, cache_dir: str | Path) -> Path:
 
 
 def iter_sentences(path: Path) -> Iterator[TokenList]:
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(path, encoding="utf-8") as fh:
         yield from parse_incr(fh)
 
 

@@ -69,8 +69,7 @@ def test_span_columns_survive_a_csv_round_trip(tmp_path):
 def test_null_table_fits_on_select_and_reports_on_test():
     select = make([("r", [i], [i + 1]) for i in range(1, 20)])
     test = make(
-        [("r", [i], [i + 1]) for i in range(1, 10)]
-        + [("r", [i], [i + 7]) for i in range(1, 10)]
+        [("r", [i], [i + 1]) for i in range(1, 10)] + [("r", [i], [i + 7]) for i in range(1, 10)]
     )
     table = build_null_table(select, test, ["r"], n_boot=500).iloc[0]
     assert table["k"] == 1
@@ -105,11 +104,24 @@ class TestVerdictUsesNullInterval:
     def _tables(self, n_correct, n_total, null_acc, null_hi):
         scores = pd.DataFrame(
             [
-                {"relation": "r", "layer": 0, "head": 0, "accuracy_select": 0.9,
-                 "accuracy_test": n_correct / n_total, "n_correct_test": n_correct,
-                 "n_total_test": n_total},
-                {"relation": "r", "layer": 1, "head": 1, "accuracy_select": 0.1,
-                 "accuracy_test": 0.1, "n_correct_test": 10, "n_total_test": 100},
+                {
+                    "relation": "r",
+                    "layer": 0,
+                    "head": 0,
+                    "accuracy_select": 0.9,
+                    "accuracy_test": n_correct / n_total,
+                    "n_correct_test": n_correct,
+                    "n_total_test": n_total,
+                },
+                {
+                    "relation": "r",
+                    "layer": 1,
+                    "head": 1,
+                    "accuracy_select": 0.1,
+                    "accuracy_test": 0.1,
+                    "n_correct_test": 10,
+                    "n_total_test": 100,
+                },
             ]
         )
         nulls = pd.DataFrame(

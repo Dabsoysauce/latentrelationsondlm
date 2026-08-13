@@ -72,7 +72,7 @@ def most_frequent_tag_baseline(
     test_labels: np.ndarray,
 ) -> float:
     table: dict[str, Counter] = defaultdict(Counter)
-    for form, tag in zip(train_forms, train_labels):
+    for form, tag in zip(train_forms, train_labels, strict=False):
         table[form][tag] += 1
     fallback = Counter(train_labels).most_common(1)[0][0]
     lookup = {f: c.most_common(1)[0][0] for f, c in table.items()}

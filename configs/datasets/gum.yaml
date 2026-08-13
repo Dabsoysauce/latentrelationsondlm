@@ -1,0 +1,21 @@
+id: gum
+treebank: UD_English-GUM
+language: en
+release: '2.15'
+repository: https://github.com/UniversalDependencies/UD_English-GUM
+revision: 34d01cb603867d0c085896e8286a0fe01229fa37
+checksums:
+  train: sha256:2c25ae2a7c51ac467777eeeb0beae46b46e389c5e8c5d6f8a0513b0e0f7683af
+  dev: sha256:6625c7dcdf8440cc8d098aef13e84ed5585c7a9484c47a07ac9f15e73a6b02a6
+  test: sha256:99deb5746618d8ab83e5cafc2d07851e76389b2c8babf5ad9e5ef176a4619114
+cache_dir: data/ud
+select_from: train
+dev_from: dev
+test_from: test
+n_select: null
+n_dev: null
+n_test: null
+seed: 42
+dedupe_normalized_text: true
+min_words: 4
+max_words: null

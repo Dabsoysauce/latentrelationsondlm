@@ -1,0 +1,21 @@
+id: lines
+treebank: UD_English-LinES
+language: en
+release: '2.15'
+repository: https://github.com/UniversalDependencies/UD_English-LinES
+revision: eced5e12e60ec8b6a2e7b9e29892ae34749678a3
+checksums:
+  train: sha256:b41f1e7b5dc17c6853264ea9e9bf0eb7a34dc7b0bd3cb8acde327b7398485cea
+  dev: sha256:43fbf0439b403548b32cd741ed656f7c6ed669ba3be36ae14ed05bbba35b3941
+  test: sha256:fc369392b699d2c503e3eed86a5093ef23c013145ae459ef422ad5554de1cdb3
+cache_dir: data/ud
+select_from: train
+dev_from: dev
+test_from: test
+n_select: null
+n_dev: null
+n_test: null
+seed: 42
+dedupe_normalized_text: true
+min_words: 4
+max_words: null

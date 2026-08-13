@@ -6,7 +6,7 @@ import pandas as pd
 
 from ..config import Config, DiffusionConfig
 from ..data import examples_for_split
-from ..diffusion import attentions_at_time, receiver_predictions
+from ..diffusion import attentions_at_time, endpoint_visibility, receiver_predictions
 from ..evaluation.metrics import offset_correctness
 from ..relations import Example
 
@@ -58,8 +58,7 @@ def masked_state_curve(
                         cfg.exclude_self,
                     )[head]
 
-                    endpoints = list(a_span) + list(r_span)
-                    both_masked = not any(state.is_visible[p] for p in endpoints)
+                    visibility = endpoint_visibility(state.is_visible, a_span, sorted(r_span))
 
                     rows.append(
                         {
@@ -68,9 +67,11 @@ def masked_state_curve(
                             "head": head,
                             "seed": seed,
                             "timestep": t,
+                            "normalized_progress": t / max(cfg.steps - 1, 1),
                             "sentence_idx": si,
                             "correct": int(pred in r_span),
-                            "both_endpoints_masked": both_masked,
+                            "visibility": visibility,
+                            "both_endpoints_masked": visibility == "both_masked",
                             "n_masked": state.n_masked,
                             "word_distance": inst.word_distance,
                             "attender_span": inst.attender_span,
@@ -84,27 +85,31 @@ def masked_state_curve(
 
 
 def aggregate_curve(raw: pd.DataFrame, min_masked: int = 25) -> pd.DataFrame:
-    masked = raw[raw["both_endpoints_masked"] & (raw["n_masked"] >= min_masked)]
-    unmasked = raw[~raw["both_endpoints_masked"]]
-
-    per_seed = []
-    for label, frame in (("masked", masked), ("unmasked", unmasked)):
-        if frame.empty:
-            continue
-        grouped = (
-            frame.groupby(["relation", "seed"])["correct"]
-            .agg(["mean", "count"])
-            .reset_index()
-        )
-        grouped["state"] = label
-        per_seed.append(grouped)
-
-    if not per_seed:
+    """Retain time and four endpoint states; filter on relation denominators."""
+    if raw.empty:
         return pd.DataFrame()
-
-    combined = pd.concat(per_seed, ignore_index=True)
+    frame = raw.copy()
+    if "visibility" not in frame:
+        frame["visibility"] = frame["both_endpoints_masked"].map(
+            {True: "both_masked", False: "both_visible"}
+        )
+    denominator = frame.groupby(["relation", "seed", "timestep", "visibility"], observed=True)[
+        "correct"
+    ].transform("size")
+    frame = frame[(frame["visibility"] != "both_masked") | (denominator >= min_masked)]
+    per_seed = (
+        frame.groupby(
+            ["relation", "layer", "head", "seed", "timestep", "normalized_progress", "visibility"],
+            observed=True,
+        )["correct"]
+        .agg(["mean", "count"])
+        .reset_index()
+    )
     return (
-        combined.groupby(["relation", "state"])
+        per_seed.groupby(
+            ["relation", "layer", "head", "timestep", "normalized_progress", "visibility"],
+            observed=True,
+        )
         .agg(
             accuracy_mean=("mean", "mean"),
             accuracy_std=("mean", "std"),
@@ -147,8 +152,7 @@ def run(model, tokenizer, cfg: Config, out: Path) -> None:
     if null_path.exists():
         nulls = pd.read_csv(null_path).set_index("relation")
         masked = raw[
-            raw["both_endpoints_masked"]
-            & (raw["n_masked"] >= cfg.diffusion.min_masked_positions)
+            raw["both_endpoints_masked"] & (raw["n_masked"] >= cfg.diffusion.min_masked_positions)
         ]
         rows = []
         for relation, group in masked.groupby("relation"):

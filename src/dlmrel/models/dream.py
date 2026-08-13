@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from .base import ModelAdapter
+from .base import Capabilities, ModelAdapter
 
 CHECKPOINT = "Dream-org/Dream-v0-Base-7B"
 
@@ -15,6 +15,9 @@ _DTYPES = {
 
 class DreamAdapter(ModelAdapter, torch.nn.Module):
     mask_free = True
+    capabilities = Capabilities(
+        logits=True, hidden_states=True, attentions=True, native_generation=True
+    )
 
     def __init__(self, backbone, tokenizer, device: str):
         torch.nn.Module.__init__(self)
@@ -43,8 +46,7 @@ class DreamAdapter(ModelAdapter, torch.nn.Module):
         )
         if getattr(out, "attentions", None) is None:
             raise RuntimeError(
-                "Dream returned no attention weights; load with "
-                "attn_implementation='eager'."
+                "Dream returned no attention weights; load with attn_implementation='eager'."
             )
         if output_hidden_states:
             return None, out.attentions, out.hidden_states
@@ -63,11 +65,20 @@ def load(model_cfg: dict):
     if "default" not in ROPE_INIT_FUNCTIONS and "rope" in ROPE_INIT_FUNCTIONS:
         ROPE_INIT_FUNCTIONS["default"] = ROPE_INIT_FUNCTIONS["rope"]
 
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
+    revision = model_cfg["revision"]
+    remote_revision = model_cfg.get("remote_code_revision") or revision
+    tokenizer = AutoTokenizer.from_pretrained(
+        checkpoint,
+        revision=model_cfg["tokenizer_revision"],
+        trust_remote_code=True,
+        code_revision=remote_revision,
+    )
 
     try:
         backbone = AutoModel.from_pretrained(
             checkpoint,
+            revision=revision,
+            code_revision=remote_revision,
             torch_dtype=dtype,
             trust_remote_code=True,
             device_map="auto",
@@ -75,7 +86,12 @@ def load(model_cfg: dict):
         ).eval()
     except (TypeError, ValueError):
         backbone = AutoModel.from_pretrained(
-            checkpoint, torch_dtype=dtype, trust_remote_code=True, device_map="auto"
+            checkpoint,
+            revision=revision,
+            code_revision=remote_revision,
+            torch_dtype=dtype,
+            trust_remote_code=True,
+            device_map="auto",
         ).eval()
 
     if tokenizer.mask_token_id is None:
@@ -86,6 +102,9 @@ def load(model_cfg: dict):
     hf = backbone.config
     meta = {
         "checkpoint": checkpoint,
+        "revision": revision,
+        "remote_code_revision": remote_revision,
+        "capabilities": adapter.capabilities.__dict__,
         "n_layers": hf.num_hidden_layers,
         "n_heads": hf.num_attention_heads,
         "hidden_size": hf.hidden_size,

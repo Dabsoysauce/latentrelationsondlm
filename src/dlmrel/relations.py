@@ -9,6 +9,7 @@ rather than recovered later.
 
 from __future__ import annotations
 
+import hashlib
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
@@ -34,6 +35,17 @@ class RelationInstance:
     attender_word_idx: int
     receiver_word_idx: int
     dep: str
+    instance_id: str = ""
+    attender_upos: str = ""
+    receiver_upos: str = ""
+    punctuation_between: bool = False
+    clause_depth: int = 0
+    embedded_clause: bool = False
+    coordinated: bool = False
+    relative_clause: bool = False
+    passive_voice: bool = False
+    intervening_verbs: int = 0
+    intervening_nouns: int = 0
 
     @property
     def word_distance(self) -> int:
@@ -56,6 +68,9 @@ class Example:
     relations: list[RelationInstance]
     seq_len: int
     source: str = ""
+    sentence_id: str = ""
+    language: str = ""
+    original_split: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
 
 
@@ -112,6 +127,16 @@ def extract_relations(
         if relation is None:
             continue
 
+        between = tokens[min(i, head_i) + 1 : max(i, head_i)]
+        path_depth = _ancestor_depth(tokens, id_to_idx, i)
+        passive = str(dep or "").startswith("nsubj:pass") or any(
+            _base_dep(item.get("deprel")) == "aux" and str(item.get("deprel")).endswith(":pass")
+            for item in tokens
+            if item.get("head") == head_id
+        )
+        relation_id = hashlib.sha256(
+            f"{relation}|{i}|{head_i}|{tok.get('form')}|{head_tok.get('form')}".encode()
+        ).hexdigest()[:20]
         instances.append(
             RelationInstance(
                 relation=relation,
@@ -122,10 +147,35 @@ def extract_relations(
                 attender_word_idx=i,
                 receiver_word_idx=head_i,
                 dep=dep,
+                instance_id=relation_id,
+                attender_upos=str(tok.get("upos") or ""),
+                receiver_upos=str(head_tok.get("upos") or ""),
+                punctuation_between=any(item.get("upos") == "PUNCT" for item in between),
+                clause_depth=path_depth,
+                embedded_clause=path_depth > 1
+                or _base_dep(head_tok.get("deprel")) in {"ccomp", "xcomp", "advcl", "acl"},
+                coordinated=_base_dep(tok.get("deprel")) == "conj"
+                or _base_dep(head_tok.get("deprel")) == "conj",
+                relative_clause=str(head_tok.get("deprel") or "").startswith("acl:relcl"),
+                passive_voice=passive,
+                intervening_verbs=sum(item.get("upos") in VERB_UPOS for item in between),
+                intervening_nouns=sum(item.get("upos") in NOUN_UPOS for item in between),
             )
         )
 
     return instances
+
+
+def _ancestor_depth(tokens: list, id_to_idx: dict[int, int], start: int) -> int:
+    depth, current, seen = 0, start, set()
+    while current not in seen:
+        seen.add(current)
+        head_id = tokens[current].get("head")
+        if not isinstance(head_id, int) or head_id == 0 or head_id not in id_to_idx:
+            break
+        current = id_to_idx[head_id]
+        depth += 1
+    return depth
 
 
 def build_example(
@@ -164,6 +214,12 @@ def build_example(
     if not relations:
         return None
 
+    sent_id = str(sentence.metadata.get("sent_id") or "")
+    text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    stable_sentence_id = sent_id or f"text-{text_hash}"
+    for relation in relations:
+        relation.instance_id = f"{stable_sentence_id}:{relation.instance_id}"
+
     return Example(
         text=text,
         tokens=forms,
@@ -174,6 +230,8 @@ def build_example(
         relations=relations,
         seq_len=seq_len,
         source=sentence.metadata.get("source_treebank", ""),
+        sentence_id=stable_sentence_id,
+        original_split=str(sentence.metadata.get("source_split") or ""),
     )
 
 
@@ -214,6 +272,10 @@ def relations_to_records(examples: list[Example], split: str) -> list[dict]:
                     "sentence_idx": si,
                     "sentence": ex.text,
                     "source": ex.source,
+                    "sentence_id": ex.sentence_id,
+                    "language": ex.language,
+                    "original_split": ex.original_split,
+                    "instance_id": inst.instance_id,
                     "relation": inst.relation,
                     "attender_text": inst.attender_text,
                     "receiver_text": inst.receiver_text,
@@ -223,6 +285,21 @@ def relations_to_records(examples: list[Example], split: str) -> list[dict]:
                     "attender_word_idx": inst.attender_word_idx,
                     "receiver_word_idx": inst.receiver_word_idx,
                     "word_distance": inst.word_distance,
+                    "signed_direction": "right" if inst.word_distance > 0 else "left",
+                    "attender_upos": inst.attender_upos,
+                    "receiver_upos": inst.receiver_upos,
+                    "punctuation_between": inst.punctuation_between,
+                    "clause_depth": inst.clause_depth,
+                    "embedded_clause": inst.embedded_clause,
+                    "coordinated": inst.coordinated,
+                    "relative_clause": inst.relative_clause,
+                    "passive_voice": inst.passive_voice,
+                    "intervening_verbs": inst.intervening_verbs,
+                    "intervening_nouns": inst.intervening_nouns,
+                    "sentence_length_words": len(ex.tokens),
+                    "sentence_length_subtokens": ex.seq_len,
+                    "attender_bpe_length": len(inst.attender_span),
+                    "receiver_bpe_length": len(inst.receiver_span),
                 }
             )
     return rows
