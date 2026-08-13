@@ -88,9 +88,7 @@ def score_split(
     return pd.DataFrame(rows)
 
 
-def merge_splits(
-    select: pd.DataFrame, test: pd.DataFrame, dev: pd.DataFrame | None = None
-) -> pd.DataFrame:
+def merge_splits(select: pd.DataFrame, test: pd.DataFrame, dev: pd.DataFrame | None = None) -> pd.DataFrame:
     keys = ["relation", "layer", "head"]
     merged = select.merge(test, on=keys, suffixes=("_select", "_test"))
     if dev is not None:

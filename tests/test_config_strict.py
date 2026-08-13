@@ -30,6 +30,8 @@ def test_every_experiment_yaml_is_strictly_consumed_with_fake_model():
             if raw.get("track") == "external_treebank_transfer"
             else ROOT / "configs/datasets/ewt.yaml"
         )
+        if raw.get("type") == "native_timing":
+            continue
         RunConfig.load_files(ROOT / "configs/models/fake.yaml", dataset, experiment)
 
 

@@ -97,9 +97,7 @@ def assert_zero_overlap(manifests: dict[str, list[ManifestRow]]) -> None:
         for row in rows:
             previous = seen.setdefault(row.text_sha256, role)
             if previous != role:
-                raise ValueError(
-                    f"normalized text overlaps {previous} and {role}: {row.sentence_id}"
-                )
+                raise ValueError(f"normalized text overlaps {previous} and {role}: {row.sentence_id}")
 
 
 def common_valid_instances(eligible_ids: dict[str, set[str]]) -> set[str]:

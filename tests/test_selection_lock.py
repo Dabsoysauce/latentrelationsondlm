@@ -33,6 +33,7 @@ def test_test_scores_cannot_change_locked_head():
         config_hash="c",
         select_manifest_hash="s",
         dev_manifest_hash="d",
+        frozen_settings={"fixed_offset": -2},
     )
     assert (lock.layer, lock.head) == (0, 1)
     test = _scores([(0, 0, 1.0), (0, 1, 0.0), (1, 0, 1.0)])
@@ -56,5 +57,6 @@ def test_dev_tie_break_is_deterministic():
         config_hash="c",
         select_manifest_hash="s",
         dev_manifest_hash="d",
+        frozen_settings={},
     )
     assert (lock.layer, lock.head) == (0, 2)

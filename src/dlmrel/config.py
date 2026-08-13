@@ -58,9 +58,7 @@ class DatasetConfig:
         if not self.id or not self.treebank or not self.revision:
             raise ConfigError("dataset id, treebank, and revision are required")
         if (self.select_from, self.dev_from, self.test_from) != ("train", "dev", "test"):
-            raise ConfigError(
-                "rigorous datasets must map select/dev/test to official train/dev/test"
-            )
+            raise ConfigError("rigorous datasets must map select/dev/test to official train/dev/test")
         for split, digest in self.checksums.items():
             if split not in {"train", "dev", "test"} or not digest.startswith("sha256:"):
                 raise ConfigError("dataset checksums must be sha256:<hex> for train/dev/test")
@@ -230,9 +228,7 @@ class RunConfig:
         }
         capability = required.get(self.experiment.type)
         if capability and not getattr(self.model.capabilities, capability):
-            raise ConfigError(
-                f"experiment {self.experiment.type!r} requires model capability {capability!r}"
-            )
+            raise ConfigError(f"experiment {self.experiment.type!r} requires model capability {capability!r}")
 
     @classmethod
     def load_files(
@@ -335,9 +331,7 @@ def _strict_dataclass(cls: type[T], raw: dict[str, Any], where: str) -> T:
             continue
         value = raw[item.name]
         nested = _nested_dataclass(hints.get(item.name, item.type))
-        values[item.name] = (
-            _strict_dataclass(nested, value, f"{where}.{item.name}") if nested else value
-        )
+        values[item.name] = _strict_dataclass(nested, value, f"{where}.{item.name}") if nested else value
     return cls(**values)
 
 

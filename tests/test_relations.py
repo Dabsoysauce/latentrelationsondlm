@@ -61,9 +61,7 @@ def test_adjective_to_noun_is_adjacent(sentence):
 
 
 def test_determiner_to_noun_is_not_always_adjacent(sentence):
-    distances = {
-        rel.word_distance for rel in relations_of(sentence) if rel.relation.endswith("_det_to_noun")
-    }
+    distances = {rel.word_distance for rel in relations_of(sentence) if rel.relation.endswith("_det_to_noun")}
     assert distances == {2}
 
 

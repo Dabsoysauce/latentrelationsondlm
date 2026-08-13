@@ -205,9 +205,7 @@ def attention_head_grid(
     for r, head in enumerate(heads):
         for c, t in enumerate(timesteps):
             ax = axes[r][c]
-            im = ax.imshow(
-                np.asarray(matrices[r][c]), cmap="viridis", vmin=0.0, vmax=vmax, aspect="auto"
-            )
+            im = ax.imshow(np.asarray(matrices[r][c]), cmap="viridis", vmin=0.0, vmax=vmax, aspect="auto")
             ax.set_xticks([])
             ax.set_yticks([])
             if r == 0:

@@ -85,6 +85,16 @@ def state_at_time(
     true_ids, tokens = tokenize(tokenizer, text, model.device, include_bos)
     seq_len = true_ids.shape[1]
 
+    if tokenizer.mask_token_id is None:
+        if not getattr(model, "mask_free", False) or diffusion_time != steps - 1:
+            raise ValueError("a model without a mask token supports only its final static state")
+        return DenoisingState(
+            input_ids=true_ids,
+            tokens=tokens,
+            is_visible=[True] * seq_len,
+            unmask_step=[0] * seq_len,
+        )
+
     maskable = torch.ones_like(true_ids, dtype=torch.bool)
     if include_bos:
         maskable[:, 0] = False
@@ -165,6 +175,10 @@ def states_at_time(
     """Return `(attentions, hidden_states, state)` for one sentence."""
     state = state_at_time(model, tokenizer, text, diffusion_time, steps, seed, include_bos)
 
+    if hasattr(model, "forward_hidden_states"):
+        _, hidden = model.forward_hidden_states(state.input_ids)
+        return (), hidden, state
+
     if getattr(model, "mask_free", False):
         _, attentions, hidden = model.forward_attentions(state.input_ids, output_hidden_states=True)
         return attentions, hidden, state
@@ -217,9 +231,7 @@ def receiver_predictions(
     return row.argmax(dim=1).cpu().numpy()
 
 
-def endpoint_visibility(
-    is_visible: list[bool], attender_span: list[int], receiver_span: list[int]
-) -> str:
+def endpoint_visibility(is_visible: list[bool], attender_span: list[int], receiver_span: list[int]) -> str:
     """Four mutually exclusive whole-word endpoint visibility states."""
     attender_visible = all(is_visible[index] for index in attender_span)
     receiver_visible = all(is_visible[index] for index in receiver_span)

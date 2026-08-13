@@ -9,9 +9,7 @@ from .base import Capabilities, ModelAdapter
 
 class GPT2Adapter(ModelAdapter, torch.nn.Module):
     mask_free = True
-    capabilities = Capabilities(
-        logits=True, hidden_states=True, attentions=True, native_generation=True
-    )
+    capabilities = Capabilities(logits=True, hidden_states=True, attentions=True)
 
     def __init__(self, backbone, tokenizer, device: str):
         torch.nn.Module.__init__(self)

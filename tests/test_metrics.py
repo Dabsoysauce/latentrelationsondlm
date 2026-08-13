@@ -15,9 +15,7 @@ from dlmrel.evaluation.statistics import build_head_vs_null_table
 
 
 def make(rows):
-    return pd.DataFrame(
-        [{"relation": r, "attender_span": a, "receiver_span": rec} for r, a, rec in rows]
-    )
+    return pd.DataFrame([{"relation": r, "attender_span": a, "receiver_span": rec} for r, a, rec in rows])
 
 
 def test_perfect_adjacent_relation_is_solved_by_offset_one():
@@ -68,9 +66,7 @@ def test_span_columns_survive_a_csv_round_trip(tmp_path):
 
 def test_null_table_fits_on_select_and_reports_on_test():
     select = make([("r", [i], [i + 1]) for i in range(1, 20)])
-    test = make(
-        [("r", [i], [i + 1]) for i in range(1, 10)] + [("r", [i], [i + 7]) for i in range(1, 10)]
-    )
+    test = make([("r", [i], [i + 1]) for i in range(1, 10)] + [("r", [i], [i + 7]) for i in range(1, 10)])
     table = build_null_table(select, test, ["r"], n_boot=500).iloc[0]
     assert table["k"] == 1
     assert table["null_fit_acc"] == 1.0
@@ -124,9 +120,7 @@ class TestVerdictUsesNullInterval:
                 },
             ]
         )
-        nulls = pd.DataFrame(
-            [{"relation": "r", "k": 1, "null_test_acc": null_acc, "null_ci_hi": null_hi}]
-        )
+        nulls = pd.DataFrame([{"relation": "r", "k": 1, "null_test_acc": null_acc, "null_ci_hi": null_hi}])
         return scores, nulls
 
     def test_head_inside_the_null_interval_does_not_survive(self):

@@ -37,9 +37,7 @@ class OffsetNull:
         return anchor + self.k
 
 
-def _anchors_and_targets(
-    df: pd.DataFrame, attender_token: str = "last"
-) -> tuple[np.ndarray, list[set[int]]]:
+def _anchors_and_targets(df: pd.DataFrame, attender_token: str = "last") -> tuple[np.ndarray, list[set[int]]]:
     """Reduce each instance to (attender anchor token, receiver token set).
 
     The anchor must be the same token the attention row is taken from,

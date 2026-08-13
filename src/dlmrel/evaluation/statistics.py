@@ -30,9 +30,7 @@ def n_heads_above_null(scores: pd.DataFrame, null_acc: float, column: str) -> in
     return int((scores[column] > null_acc).sum())
 
 
-def selection_rank_correlation(
-    scores: pd.DataFrame, select_col: str, test_col: str
-) -> tuple[float, float]:
+def selection_rank_correlation(scores: pd.DataFrame, select_col: str, test_col: str) -> tuple[float, float]:
     """Spearman rho and p-value between selection and reporting splits."""
     if len(scores) < 3:
         return (float("nan"), float("nan"))

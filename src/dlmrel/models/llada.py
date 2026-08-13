@@ -13,7 +13,6 @@ class LLaDAAdapter(ModelAdapter, torch.nn.Module):
         hidden_states=True,
         attentions=False,
         native_timestep=True,
-        native_generation=True,
     )
 
     def __init__(self, backbone, tokenizer, device: str):
@@ -47,6 +46,19 @@ class LLaDAAdapter(ModelAdapter, torch.nn.Module):
         raise NotImplementedError(
             "LLaDA attention is disabled until official/instrumented numerical parity passes"
         )
+
+    @torch.no_grad()
+    def forward_hidden_states(self, input_ids):
+        output = self.backbone(
+            input_ids=input_ids,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        hidden = output.hidden_states
+        logits = getattr(output, "logits", None)
+        if logits is None:
+            logits = self.get_logits(hidden[-1])
+        return logits, hidden
 
 
 def load(model_cfg: dict):

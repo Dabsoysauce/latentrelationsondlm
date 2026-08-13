@@ -67,6 +67,7 @@ class SelectionLock:
     select_manifest_hash: str
     dev_manifest_hash: str
     candidate_scores_hash: str
+    frozen_settings: dict[str, Any]
     created_at: str
 
     @classmethod
@@ -210,9 +211,7 @@ def validate_run(path: str | Path) -> dict[str, Any]:
             if config_path.exists():
                 declared = config.get("model", {}).get("capabilities", {})
                 unsupported = sorted(
-                    name
-                    for name, value in claimed.items()
-                    if value and not declared.get(name, False)
+                    name for name, value in claimed.items() if value and not declared.get(name, False)
                 )
                 if unsupported:
                     errors.append("unsupported capability claim: " + ", ".join(unsupported))

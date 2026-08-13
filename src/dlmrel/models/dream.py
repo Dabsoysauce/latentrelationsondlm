@@ -15,9 +15,7 @@ _DTYPES = {
 
 class DreamAdapter(ModelAdapter, torch.nn.Module):
     mask_free = True
-    capabilities = Capabilities(
-        logits=True, hidden_states=True, attentions=True, native_generation=True
-    )
+    capabilities = Capabilities(logits=True, hidden_states=True, attentions=True)
 
     def __init__(self, backbone, tokenizer, device: str):
         torch.nn.Module.__init__(self)
@@ -45,9 +43,7 @@ class DreamAdapter(ModelAdapter, torch.nn.Module):
             return_dict=True,
         )
         if getattr(out, "attentions", None) is None:
-            raise RuntimeError(
-                "Dream returned no attention weights; load with attn_implementation='eager'."
-            )
+            raise RuntimeError("Dream returned no attention weights; load with attn_implementation='eager'.")
         if output_hidden_states:
             return None, out.attentions, out.hidden_states
         return None, out.attentions
@@ -113,10 +109,7 @@ def load(model_cfg: dict):
     }
 
     probe = torch.tensor(
-        [
-            [tokenizer.bos_token_id]
-            + tokenizer.encode("The cat sat on the mat.", add_special_tokens=False)
-        ],
+        [[tokenizer.bos_token_id] + tokenizer.encode("The cat sat on the mat.", add_special_tokens=False)],
         device=adapter.device,
     )
     _, attentions = adapter.forward_attentions(probe)

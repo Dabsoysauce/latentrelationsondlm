@@ -29,9 +29,7 @@ def rank_candidates(select_scores: pd.DataFrame, *, relation: str, top_k: int = 
     )
 
 
-def choose_on_dev(
-    candidates: pd.DataFrame, dev_scores: pd.DataFrame
-) -> tuple[pd.Series, pd.DataFrame]:
+def choose_on_dev(candidates: pd.DataFrame, dev_scores: pd.DataFrame) -> tuple[pd.Series, pd.DataFrame]:
     """Choose among select top-K using dev only and a deterministic tie-break."""
     candidate_keys = candidates[SCORE_KEYS]
     scored = candidate_keys.merge(dev_scores, on=SCORE_KEYS, how="left", validate="one_to_one")
@@ -58,6 +56,7 @@ def create_selection_lock(
     config_hash: str,
     select_manifest_hash: str,
     dev_manifest_hash: str,
+    frozen_settings: dict | None = None,
 ) -> tuple[SelectionLock, pd.DataFrame, pd.DataFrame]:
     candidates = rank_candidates(select_scores, relation=relation, top_k=top_k)
     winner, dev_candidates = choose_on_dev(candidates, dev_scores)
@@ -79,6 +78,7 @@ def create_selection_lock(
         candidate_scores_hash=canonical_hash(
             {"select": candidates.to_dict("records"), "dev": dev_candidates.to_dict("records")}
         ),
+        frozen_settings=frozen_settings or {},
     )
     return lock, candidates, dev_candidates
 
@@ -96,9 +96,7 @@ def locked_test_view(test_rows: pd.DataFrame, lock: SelectionLock) -> pd.DataFra
     return test_rows.loc[mask].copy().reset_index(drop=True)
 
 
-def write_lock_bundle(
-    path: str | Path, lock: SelectionLock, select: pd.DataFrame, dev: pd.DataFrame
-) -> None:
+def write_lock_bundle(path: str | Path, lock: SelectionLock, select: pd.DataFrame, dev: pd.DataFrame) -> None:
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     lock.write_once(path / "selection_lock.json")

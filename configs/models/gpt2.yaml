@@ -14,4 +14,4 @@ capabilities:
   native_timestep: false
   head_residuals: false
   head_ablation: false
-  native_generation: true
+  native_generation: false

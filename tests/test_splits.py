@@ -29,10 +29,7 @@ def test_official_boundaries_determinism_deduplication():
     assert [row.original_split for row in first["dev"]] == ["dev"] * len(first["dev"])
     assert [row.original_split for row in first["test"]] == ["test"] * len(first["test"])
     assert manifest_hash(first["select"]) == manifest_hash(second["select"])
-    assert (
-        sum(row.normalized_text == "same text here now" for rows in first.values() for row in rows)
-        == 1
-    )
+    assert sum(row.normalized_text == "same text here now" for rows in first.values() for row in rows) == 1
     assert_zero_overlap(first)
 
 

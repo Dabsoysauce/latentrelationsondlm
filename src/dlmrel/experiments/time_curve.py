@@ -90,9 +90,7 @@ def aggregate_curve(raw: pd.DataFrame, min_masked: int = 25) -> pd.DataFrame:
         return pd.DataFrame()
     frame = raw.copy()
     if "visibility" not in frame:
-        frame["visibility"] = frame["both_endpoints_masked"].map(
-            {True: "both_masked", False: "both_visible"}
-        )
+        frame["visibility"] = frame["both_endpoints_masked"].map({True: "both_masked", False: "both_visible"})
     denominator = frame.groupby(["relation", "seed", "timestep", "visibility"], observed=True)[
         "correct"
     ].transform("size")
@@ -151,9 +149,7 @@ def run(model, tokenizer, cfg: Config, out: Path) -> None:
     null_path = data_dir / "offset_null.csv"
     if null_path.exists():
         nulls = pd.read_csv(null_path).set_index("relation")
-        masked = raw[
-            raw["both_endpoints_masked"] & (raw["n_masked"] >= cfg.diffusion.min_masked_positions)
-        ]
+        masked = raw[raw["both_endpoints_masked"] & (raw["n_masked"] >= cfg.diffusion.min_masked_positions)]
         rows = []
         for relation, group in masked.groupby("relation"):
             k = int(nulls.loc[relation, "k"])

@@ -1,57 +1,69 @@
-# Linguistic Relations in Diffusion Language Models
+# Latent relations in diffusion language models
 
-This repository studies where and when diffusion language models represent linguistic relations during denoising.
+This repository tests whether diffusion language models encode UD dependency
+relations in attention, representations, logits, and causal behavior. The
+rigorous pipeline separates historical reproduction, confirmatory EWT testing,
+locked external-treebank transfer, and exploratory extensions.
 
-We compare DiffuGPT-S, DiffuLLaMA-7B, Dream-7B, and LLaDA-8B using the same data, experiments, and evaluation methods.
+Current claim status: historical evidence supports a DiffuGPT-S
+object-to-verb attention motif, including a reported pre-unmask effect. The
+archived preliminary larger-model results do **not** yet establish that effect,
+locked cross-treebank transfer, or causal necessity. Those claims require the
+GPU gates and full runs documented below.
 
-## Experiments
+## Install
 
-- Relation-head search
-- Relation accuracy over diffusion time
-- Attention entropy
-- Part-of-speech probing
-- Logit-lens analysis
-
-## Repository structure
-
-```text
-configs/     Model and experiment settings
-data/        Shared Universal Dependencies data
-src/dlmrel/  Reusable model, experiment, and evaluation code
-results/     Outputs organized by model
-tests/       Automated checks
-docs/        Shared protocol and team documentation
-```
-
-`src/dlmrel/models/` contains model-specific code. Each shared experiment is implemented once in `src/dlmrel/experiments/`.
-
-## Setup
-
-```bash
-python -m venv .venv
-pip install -e ".[dream]"
-```
-
-Activate the environment on Windows:
+Core CPU validation:
 
 ```powershell
-.venv\Scripts\Activate.ps1
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev,probe]"
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
-## Run an experiment
+Install one model-specific requirements file in a separate environment. Dream
+and DiffuLLaMA intentionally use incompatible Transformers versions.
 
-Prepare the shared UD data once:
+## Quickstart
 
-```bash
-dlmrel prepare-data
+```powershell
+dlmrel data audit --dataset configs/datasets/ewt.yaml
+dlmrel model smoke-test --model configs/models/diffugpt.yaml --dry-run
+dlmrel run --model configs/models/fake.yaml --dataset configs/datasets/ewt.yaml --experiment configs/experiments/head_search.yaml --dry-run
+dlmrel status --results results
 ```
 
-Run relation-head search on Dream-7B:
+Remove `--dry-run` only in the appropriate environment. Every non-dry run uses
+`results/<track>/<model>/<dataset>/<experiment>/<run_id>/` and refuses to
+overwrite a completed run. Use `--run-id <id> --resume` for deterministic
+resumption.
 
-```bash
-dlmrel run --model dream_7b --experiment head_search
-```
+## Capability matrix
 
-Results are saved under `results/<model>/<experiment>/`.
+| Model | Logits/hidden | Attention | DLA/ablation | Denoising time | Status |
+|---|---:|---:|---:|---:|---|
+| Fake CPU | yes | yes | yes | synthetic | CPU test harness |
+| DiffuGPT-S | yes | yes | gated | yes | GPU gate not run |
+| DiffuLLaMA | yes | yes | gated | yes | GPU gate not run |
+| Dream-7B | yes | yes | gated | analysis schedule | GPU gate not run |
+| LLaDA-8B | yes | disabled | disabled | yes | attention parity not run |
+| GPT-2 | yes | yes | gated | not applicable | final-state baseline |
 
-See `docs/experiment_protocol.md` for the shared scientific procedure.
+“Gated” means the adapter does not advertise the capability until a validated
+intervention/decomposition is available. GPT-2 is never used for masked-state
+or denoising claims.
+
+## Protocol and guides
+
+- [Frozen experiment protocol](docs/experiment_protocol.md)
+- [Treebanks and immutable revisions](docs/treebanks.md)
+- [Model adapters and environments](docs/model_adapters.md)
+- [Result schemas](docs/result_format.md)
+- [Legacy reproduction](docs/reproduction.md)
+- [Colab guide](docs/colab_guide.md)
+- [Modal guide](docs/modal_guide.md)
+- [Implementation status](docs/implementation_status.md)
+
+Historical outputs live under
+`results/reference_legacy/pre_rigorous_6e5aaec/` with explicit provenance.
+They are regression references, not confirmatory results.

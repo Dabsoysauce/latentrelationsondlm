@@ -47,9 +47,7 @@ class FakeAdapter(ModelAdapter):
         basis = torch.nn.functional.one_hot(input_ids % self.hidden, self.hidden).float()
         hidden_states = tuple(basis + layer for layer in range(self.layers + 1))
         unembed = (
-            torch.arange(self.hidden * self.vocab, dtype=torch.float32).reshape(
-                self.hidden, self.vocab
-            )
+            torch.arange(self.hidden * self.vocab, dtype=torch.float32).reshape(self.hidden, self.vocab)
             / 1000
         )
         logits = hidden_states[-1] @ unembed
@@ -85,7 +83,5 @@ class FakeAdapter(ModelAdapter):
         target_token: int,
     ) -> float:
         base = self.forward(input_ids).logits[0, target_position, target_token]
-        ablated = self.forward(input_ids, ablate=(layer, head)).logits[
-            0, target_position, target_token
-        ]
+        ablated = self.forward(input_ids, ablate=(layer, head)).logits[0, target_position, target_token]
         return float(base - ablated)

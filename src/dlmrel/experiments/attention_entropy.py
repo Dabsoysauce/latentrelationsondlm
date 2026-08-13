@@ -108,12 +108,9 @@ def run(model, tokenizer, cfg: Config, out: Path) -> None:
             }
         )
     tables = [
-        attention_entropy(model, tokenizer, examples, cfg.diffusion, timestep)
-        for timestep in timesteps
+        attention_entropy(model, tokenizer, examples, cfg.diffusion, timestep) for timestep in timesteps
     ]
     table = pd.concat([item for item in tables if not item.empty], ignore_index=True)
     table["normalized_progress"] = table["diffusion_time"] / max(cfg.diffusion.steps - 1, 1)
     table.to_csv(out / "attention_entropy.csv", index=False)
-    print(
-        table.groupby("layer")[["entropy_norm", "entropy_no_sink", "sink_mass"]].mean().to_string()
-    )
+    print(table.groupby("layer")[["entropy_norm", "entropy_no_sink", "sink_mass"]].mean().to_string())
