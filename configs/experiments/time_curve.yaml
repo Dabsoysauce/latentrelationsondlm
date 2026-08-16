@@ -1,2 +1,11 @@
 seeds: [1, 2, 3, 4, 5]
 timesteps: [0, 8, 16, 24, 32, 40, 48, 56]
+# Cost is seeds x timesteps x sentences forward passes. Over the full 1000
+# sentence test split that is 40,000 passes with eager attention on a 7B, which
+# does not fit a single Colab session. 300 sentences gives 12,000 passes and
+# still leaves ~320 object->verb instances per cell.
+#
+# This budget is shared across models on purpose: the cross-model comparison is
+# only meaningful if every model is measured on the same sentences.
+n_curve_sentences: 300
+min_masked_positions: 25

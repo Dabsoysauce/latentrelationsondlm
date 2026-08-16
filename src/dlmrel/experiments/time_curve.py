@@ -115,16 +115,45 @@ def aggregate_curve(raw: pd.DataFrame, min_masked: int = 25) -> pd.DataFrame:
     )
 
 
+def selected_heads(head_search_dir: Path) -> dict[str, tuple[int, int]]:
+    """The per-relation head to trace over diffusion time.
+
+    Prefers the full per-head scores, but falls back to `head_vs_null.csv`,
+    which stores the same winner: both take the top row per relation ordered by
+    selection-split accuracy. The fallback matters because the merged scores are
+    a 1024-row-per-relation intermediate that is not always kept, and re-running
+    the search on a 7B model to recover two integers per relation is hours of
+    GPU time for a number already on disk.
+    """
+    merged_path = head_search_dir / "head_scores_merged.csv"
+    if merged_path.exists():
+        merged = pd.read_csv(merged_path)
+        return {
+            relation: (int(best["layer"]), int(best["head"]))
+            for relation, group in merged.groupby("relation")
+            for best in [group.sort_values("accuracy_select", ascending=False).iloc[0]]
+        }
+
+    headline_path = head_search_dir / "head_vs_null.csv"
+    if not headline_path.exists():
+        raise FileNotFoundError(
+            f"no head selection in {head_search_dir}; run head_search first "
+            "(expected head_scores_merged.csv or head_vs_null.csv)"
+        )
+    headline = pd.read_csv(headline_path)
+    # `head` collides with DataFrame.head, so index by label rather than attribute.
+    return {
+        str(row["relation"]): (int(row["layer"]), int(row["head"]))
+        for _, row in headline.iterrows()
+    }
+
+
 def run(model, tokenizer, cfg: Config, out: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
     data_dir = Path(cfg.out_dir)
 
-    merged = pd.read_csv(data_dir / "head_search" / "head_scores_merged.csv")
-    heads = {
-        relation: (int(best["layer"]), int(best["head"]))
-        for relation, group in merged.groupby("relation")
-        for best in [group.sort_values("accuracy_select", ascending=False).iloc[0]]
-    }
+    heads = selected_heads(data_dir / "head_search")
+    print(f"[time_curve] tracing {len(heads)} heads: {heads}")
 
     examples = examples_for_split(cfg, tokenizer, "test")
 

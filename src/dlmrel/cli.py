@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import inspect
 import json
 from pathlib import Path
 
@@ -47,16 +48,36 @@ def _experiment_config(name: str) -> dict:
     return _load_yaml(path) if path.exists() else {}
 
 
+def _apply(target, source: dict) -> None:
+    """Copy recognised keys from a YAML block onto a dataclass instance.
+
+    Unknown keys are ignored rather than raising: the experiment YAMLs carry a
+    few descriptive keys (`classifier`, `measure_bos_mass`) that document the
+    run without configuring it.
+    """
+    for key, value in source.items():
+        if value is not None and hasattr(target, key):
+            setattr(target, key, value)
+
+
 def _build_config(model_name: str, model_cfg: dict, exp_cfg: dict) -> Config:
-    checkpoint = model_cfg.get("checkpoint", model_cfg.get("name"))
+    checkpoint = model_cfg.get("checkpoint")
+    if checkpoint is None:
+        raise KeyError(
+            f"configs/models/{model_name}.yaml has no `checkpoint`. Without it "
+            f"the loader would try to resolve '{model_cfg.get('name')}' as a "
+            "Hugging Face repo id."
+        )
+
+    model = ModelConfig(name=checkpoint, family=model_cfg.get("adapter", "dream"))
+    _apply(model, {k: v for k, v in model_cfg.items() if k not in ("name", "checkpoint")})
+
     diffusion = DiffusionConfig()
-    if exp_cfg.get("seeds"):
-        diffusion.seeds = exp_cfg["seeds"]
-    if exp_cfg.get("timesteps"):
-        diffusion.timesteps = exp_cfg["timesteps"]
+    _apply(diffusion, exp_cfg)
+
     return Config(
         treebank=TreebankConfig(common_pool_models=COMMON_POOL),
-        model=ModelConfig(name=checkpoint, family=model_cfg.get("adapter", "dream")),
+        model=model,
         diffusion=diffusion,
         out_dir=str(RESULTS / model_name),
     )
@@ -117,7 +138,14 @@ def cmd_run(args) -> None:
 
     experiment = importlib.import_module(EXPERIMENTS[args.experiment])
     out = Path(cfg.out_dir) / args.experiment
-    experiment.run(model, tokenizer, cfg, out)
+
+    # pos_probe needs the layer count, and reading it off the adapter differs
+    # per family (the wrapped adapters hide the backbone behind the diffusion
+    # module). The loader already reports it, so hand it over when accepted.
+    extra = {}
+    if "meta" in inspect.signature(experiment.run).parameters:
+        extra["meta"] = meta
+    experiment.run(model, tokenizer, cfg, out, **extra)
 
 
 def cmd_compare(args) -> None:

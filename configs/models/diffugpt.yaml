@@ -1,2 +1,7 @@
 name: diffugpt
+checkpoint: diffusionfamily/diffugpt-s
 adapter: diffugpt
+# Same wrapper-namespace checkpoint layout as DiffuLLaMA. Small enough that
+# float32 costs nothing and avoids bf16 rounding in the attention rows.
+dtype: float32
+attn_implementation: eager

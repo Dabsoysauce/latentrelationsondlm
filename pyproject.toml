@@ -7,14 +7,28 @@ name = "dlmrel"
 version = "0.1.0"
 description = "Linguistic-relation analysis for diffusion language models"
 requires-python = ">=3.10"
-dependencies = ["numpy", "pandas", "pyyaml", "torch", "tqdm"]
+dependencies = [
+    "numpy",
+    "pandas",
+    "pyyaml",
+    "torch",
+    "tqdm",
+    # UD treebank parsing.
+    "conllu",
+    # Spearman rank correlation for the head-selection stability check.
+    "scipy",
+]
 
 [project.optional-dependencies]
 dream = ["transformers==4.51.3", "accelerate", "sentencepiece"]
 diffugpt = ["transformers==4.44.2", "accelerate"]
+# DiffuLLaMA's attention_patch.py replaces LlamaModel.forward with the 4.44-era
+# implementation and patches LlamaFlashAttention2, which later releases removed.
+# The pin is load-bearing, not caution.
 diffullama = ["transformers==4.44.2", "accelerate", "sentencepiece"]
 llada = ["transformers", "accelerate", "sentencepiece"]
 probe = ["scikit-learn"]
+plots = ["matplotlib"]
 dev = ["pytest", "ruff"]
 
 [project.scripts]

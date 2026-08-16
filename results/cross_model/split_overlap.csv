@@ -1,2 +1,4 @@
 model_a,model_b,n_a,n_b,overlap,identical_order
-dream_7b,diffugpt,1000,1000,1000,True
+diffugpt,diffullama_7b,1000,1000,1000,True
+diffugpt,dream_7b,1000,1000,1000,True
+diffullama_7b,dream_7b,1000,1000,1000,True

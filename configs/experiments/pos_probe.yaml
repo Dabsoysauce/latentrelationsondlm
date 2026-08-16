@@ -1,2 +1,7 @@
 seeds: [1, 2, 3, 4, 5]
 classifier: logistic_regression
+n_probe_sentences: 400
+# Probing every layer of a 32-layer model holds ~1.5GB of hidden states per
+# split in host RAM. Stride 4 keeps the depth profile readable at a quarter of
+# the cost, and always includes the embedding layer (depth 0) and the top.
+probe_layer_stride: 4

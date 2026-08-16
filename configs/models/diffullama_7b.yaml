@@ -1,2 +1,10 @@
 name: diffullama_7b
+checkpoint: diffusionfamily/diffullama
 adapter: diffullama
+# The checkpoint is stored under a `denoise_model.*` wrapper namespace, so the
+# loader remaps keys before handing them to LlamaForCausalLM. Loading it
+# directly leaves the backbone randomly initialised with only a warning.
+dtype: bfloat16
+# Only eager returns attention weights; sdpa accepts output_attentions=True
+# and silently returns nothing.
+attn_implementation: eager

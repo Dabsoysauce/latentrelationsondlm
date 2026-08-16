@@ -1,2 +1,3 @@
 seeds: [1, 2, 3, 4, 5]
 timesteps: [8, 16, 32]
+n_probe_sentences: 400

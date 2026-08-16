@@ -80,9 +80,13 @@ def token_offsets(tokenizer, text: str) -> list[tuple[int, int]]:
     """Per-token character offsets, falling back to a manual scan."""
     fast = getattr(tokenizer, "_dlmrel_fast_offsets", None)
     if fast is None:
+        # A slow tokenizer does not necessarily raise on return_offsets_mapping;
+        # some silently drop the argument and return an encoding without the
+        # key, so probing for an exception alone reports a false positive and
+        # the next real call dies with KeyError. Check the key came back.
         try:
-            tokenizer("probe", return_offsets_mapping=True)
-            fast = True
+            probe = tokenizer("probe", return_offsets_mapping=True)
+            fast = "offset_mapping" in probe
         except Exception:  # noqa: BLE001
             fast = False
         tokenizer._dlmrel_fast_offsets = fast

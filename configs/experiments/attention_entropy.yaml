@@ -1,2 +1,5 @@
 seeds: [1, 2, 3, 4, 5]
 measure_bos_mass: true
+# Entropy is averaged over every attention row, so it converges long before the
+# split is exhausted; 400 sentences keeps it comparable with the other probes.
+n_probe_sentences: 400
