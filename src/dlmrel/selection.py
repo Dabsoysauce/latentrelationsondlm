@@ -57,6 +57,7 @@ def create_selection_lock(
     select_manifest_hash: str,
     dev_manifest_hash: str,
     frozen_settings: dict | None = None,
+    created_at: str | None = None,
 ) -> tuple[SelectionLock, pd.DataFrame, pd.DataFrame]:
     candidates = rank_candidates(select_scores, relation=relation, top_k=top_k)
     winner, dev_candidates = choose_on_dev(candidates, dev_scores)
@@ -79,6 +80,7 @@ def create_selection_lock(
             {"select": candidates.to_dict("records"), "dev": dev_candidates.to_dict("records")}
         ),
         frozen_settings=frozen_settings or {},
+        created_at=created_at,
     )
     return lock, candidates, dev_candidates
 

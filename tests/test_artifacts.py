@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from dlmrel.artifacts import ArtifactError, initialize_run, merge_shards, validate_run, write_shard
@@ -22,3 +24,15 @@ def test_validator_fails_incomplete_run(tmp_path):
     result = validate_run(run)
     assert not result["valid"]
     assert any("missing files" in error for error in result["errors"])
+
+
+def test_validator_detects_manifest_reference_tampering(tmp_path):
+    run = tmp_path / "run"
+    initialize_run(run, {"runtime": {}}, "command", {"select": "original"})
+    (run / "manifest_refs.json").write_text(
+        json.dumps({"select": "changed"}), encoding="utf-8"
+    )
+
+    result = validate_run(run)
+
+    assert "manifest references hash mismatch" in result["errors"]

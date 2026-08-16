@@ -9,7 +9,14 @@ from pathlib import Path
 import pandas as pd
 import torch
 
-from .artifacts import ArtifactError, SelectionLock, atomic_json, canonical_hash, write_shard
+from .artifacts import (
+    ArtifactError,
+    SelectionLock,
+    atomic_json,
+    canonical_hash,
+    scientific_configuration,
+    write_shard,
+)
 from .config import RunConfig
 from .models.fake import FakeAdapter
 from .selection import create_selection_lock, write_lock_bundle
@@ -96,9 +103,12 @@ def _selection_lock(cfg: RunConfig, run_dir: Path, scores: pd.DataFrame) -> Sele
         model_id=cfg.model.id,
         model_revision=cfg.model.revision,
         dataset_id=cfg.dataset.id,
-        config_hash=canonical_hash(cfg.to_dict()),
+        config_hash=canonical_hash(scientific_configuration(cfg.to_dict())),
         select_manifest_hash=manifests["select"],
         dev_manifest_hash=manifests["dev"],
+        created_at=json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))[
+            "started_at"
+        ],
     )
     write_lock_bundle(run_dir, lock, candidates, dev_candidates)
     return lock
