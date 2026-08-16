@@ -43,6 +43,14 @@ sentence are never treated as independent sentences. Seed summaries remain
 separate, selection-aware permutations repeat select-plus-dev selection, and
 Holm correction is the default if a reported family contains multiple tests.
 
+Scientific configuration identity includes the pinned model and revisions,
+dataset, manifest hashes, experiment, seeds, progress points, scoring, and the
+scientific contents of any source selection lock. Runtime paths, run IDs,
+`resume`, and `dry_run` are operational metadata and do not alter that
+identity. Long GPU loops write an atomic checkpoint after every 300 input
+sentences; a checkpoint is reusable only when its scientific configuration,
+manifests, stage, seed, time point, head selection, and sentence range match.
+
 ## Outputs and claims
 
 Each run contains `config.resolved.yaml`, `command.txt`, `environment.json`,

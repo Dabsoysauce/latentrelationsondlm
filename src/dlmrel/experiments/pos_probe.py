@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..checkpoints import CheckpointIdentity, SentenceCheckpointStore
 from ..config import RunConfig
 from ..data import load_manifest_examples
 from ..diffusion import states_at_time
@@ -23,10 +24,20 @@ def run(model, tokenizer, cfg: RunConfig, run_dir: Path) -> dict[str, Any]:
 
     collected = {}
     exclusions = []
+    checkpoint_store = SentenceCheckpointStore(run_dir)
+    seed = cfg.experiment.seeds[0]
     for role in ("select", "dev", "test"):
         examples, dropped = load_manifest_examples(cfg, tokenizer, role)
         exclusions.append(dropped)
-        collected[role] = masked_features(model, tokenizer, examples, cfg)
+        collected[role] = masked_features(
+            model,
+            tokenizer,
+            examples,
+            cfg,
+            seed=seed,
+            role=role,
+            checkpoint_store=checkpoint_store,
+        )
     train_x, train_y, _, train_forms = collected["select"]
     dev_x, dev_y, _, _ = collected["dev"]
     test_x, test_y, test_groups, test_forms = collected["test"]
@@ -90,8 +101,48 @@ def run(model, tokenizer, cfg: RunConfig, run_dir: Path) -> dict[str, Any]:
     return {"selected_c": selected_c, "n_test_positions": len(test_y)}
 
 
-def masked_features(model, tokenizer, examples: list[Example], cfg: RunConfig):
-    features, labels, groups, forms = [], [], [], []
+def masked_features(
+    model,
+    tokenizer,
+    examples: list[Example],
+    cfg: RunConfig,
+    *,
+    seed: int | None = None,
+    role: str | None = None,
+    checkpoint_store: SentenceCheckpointStore | None = None,
+):
+    seed = cfg.experiment.seeds[0] if seed is None else seed
+    timestep = round(cfg.experiment.normalized_progress[0] * (cfg.experiment.steps - 1))
+    if checkpoint_store is None:
+        frame = masked_feature_rows(model, tokenizer, examples, cfg, seed=seed)
+    else:
+        if role is None:
+            raise ValueError("checkpointed POS features require a dataset role")
+        identity = CheckpointIdentity(
+            stage=f"pos-probe-{role}-features",
+            seed=seed,
+            normalized_progress=cfg.experiment.normalized_progress[0],
+            timestep=timestep,
+        )
+        frame = checkpoint_store.run(
+            examples,
+            identity,
+            lambda chunk, _start: masked_feature_rows(
+                model, tokenizer, chunk, cfg, seed=seed
+            ),
+        )
+    if frame.empty:
+        return np.asarray([]), np.asarray([]), np.asarray([]), np.asarray([])
+    return (
+        np.stack(frame["feature"].map(np.asarray)),
+        frame["label"].to_numpy(),
+        frame["sentence_id"].to_numpy(),
+        frame["form"].to_numpy(),
+    )
+
+
+def masked_feature_rows(model, tokenizer, examples, cfg: RunConfig, *, seed: int):
+    rows = []
     timestep = round(cfg.experiment.normalized_progress[0] * (cfg.experiment.steps - 1))
     for example in examples:
         _, hidden_states, state = states_at_time(
@@ -100,7 +151,7 @@ def masked_features(model, tokenizer, examples: list[Example], cfg: RunConfig):
             example.text,
             timestep,
             cfg.experiment.steps,
-            cfg.experiment.seeds[0],
+            seed,
             True,
         )
         hidden = hidden_states[len(hidden_states) // 2][0].float().cpu().numpy()
@@ -109,11 +160,16 @@ def masked_features(model, tokenizer, examples: list[Example], cfg: RunConfig):
                 continue
             if any(state.is_visible[position] for position in span):
                 continue
-            features.append(hidden[span].mean(axis=0))
-            labels.append(example.upos[word_index])
-            groups.append(example.sentence_id)
-            forms.append(example.tokens[word_index])
-    return np.asarray(features), np.asarray(labels), np.asarray(groups), np.asarray(forms)
+            rows.append(
+                {
+                    "sentence_id": example.sentence_id,
+                    "word_index": word_index,
+                    "form": example.tokens[word_index],
+                    "label": example.upos[word_index],
+                    "feature": hidden[span].mean(axis=0).tolist(),
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 def lexical_predictions(train_forms, train_labels, test_forms, fallback):

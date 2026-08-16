@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from ..artifacts import ArtifactError, write_shard
+from ..checkpoints import CheckpointIdentity, SentenceCheckpointStore
 from ..config import RunConfig
 from ..controls import matched_word, receiver_controls
 from ..diffusion import attentions_at_time, endpoint_visibility, receiver_span_scores
@@ -34,6 +35,8 @@ def score_attention_heads(
     heads: set[tuple[int, int]] | None = None,
     normalized_progress: float | None = None,
     seed: int | None = None,
+    sentence_offset: int = 0,
+    total_sentences: int | None = None,
 ) -> pd.DataFrame:
     """Score all heads or one frozen subset and retain per-instance evidence."""
     progress = selection_progress(cfg) if normalized_progress is None else normalized_progress
@@ -112,8 +115,12 @@ def score_attention_heads(
                             **receiver_controls(example, instance, candidate_words, seed=seed),
                         }
                     )
-        if (sentence_index + 1) % 100 == 0:
-            print(f"[score] {role}: {sentence_index + 1}/{len(examples)}", flush=True)
+        completed = sentence_offset + sentence_index + 1
+        if completed % 100 == 0:
+            print(
+                f"[score] {role} seed={seed}: {completed}/{total_sentences or len(examples)}",
+                flush=True,
+            )
     return pd.DataFrame(rows)
 
 
@@ -128,6 +135,7 @@ def score_over_seeds(
     normalized_progress: float | None = None,
     checkpoint_dir: Path | None = None,
     stage: str = "score",
+    seeds: list[int] | None = None,
 ) -> pd.DataFrame:
     progress = selection_progress(cfg) if normalized_progress is None else normalized_progress
     suffix = (
@@ -136,14 +144,40 @@ def score_over_seeds(
         else "-".join(f"l{layer}h{head}" for layer, head in sorted(heads))
     )
     frames = []
-    for seed in cfg.experiment.seeds:
-        checkpoint = (
+    store = SentenceCheckpointStore(checkpoint_dir.parent) if checkpoint_dir is not None else None
+    for seed in cfg.experiment.seeds if seeds is None else seeds:
+        legacy = (
             checkpoint_dir / f"{stage}-seed{seed}-p{progress:.6f}-{suffix}.parquet"
             if checkpoint_dir is not None
             else None
         )
-        if checkpoint is not None and checkpoint.exists():
-            frame = pd.read_parquet(checkpoint)
+        if store is not None:
+            timestep = round(progress * (cfg.experiment.steps - 1))
+            selected_heads = tuple(sorted(heads)) if heads is not None else None
+            identity = CheckpointIdentity(
+                stage=stage,
+                seed=seed,
+                normalized_progress=progress,
+                timestep=timestep,
+                heads=selected_heads,
+            )
+            frame = store.run(
+                examples,
+                identity,
+                lambda chunk, start, current_seed=seed: score_attention_heads(
+                    model,
+                    tokenizer,
+                    list(chunk),
+                    cfg,
+                    role=role,
+                    heads=heads,
+                    normalized_progress=progress,
+                    seed=current_seed,
+                    sentence_offset=start,
+                    total_sentences=len(examples),
+                ),
+                legacy_path=legacy,
+            )
         else:
             frame = score_attention_heads(
                 model,
@@ -155,8 +189,6 @@ def score_over_seeds(
                 normalized_progress=progress,
                 seed=seed,
             )
-            if checkpoint is not None:
-                atomic_parquet(checkpoint, frame)
         frames.append(frame)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
@@ -323,13 +355,6 @@ def structural_slices(rows: pd.DataFrame) -> pd.DataFrame:
         grouped["slice_dimension"] = dimension
         outputs.append(grouped)
     return pd.concat(outputs, ignore_index=True)
-
-
-def atomic_parquet(path: Path, frame: pd.DataFrame) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    frame.to_parquet(temporary, index=False)
-    temporary.replace(path)
 
 
 def write_frames(run_dir: Path, *, raw: pd.DataFrame, exclusions: pd.DataFrame) -> None:
