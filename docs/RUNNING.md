@@ -18,6 +18,11 @@ pip install -r requirements/diffullama.txt  # DiffuLLaMA runtime only
 The notebook at `notebooks/colab_runner.ipynb` exposes the same commands. For
 each model, use this order:
 
+All active experiment configurations use exactly three seeds: `42`, `43`, and
+`44`, including the POS probe. Runs created with this protocol can resume with
+the same run ID; older one-seed or five-seed runs require a new run ID because
+their scientific configuration is genuinely different.
+
 ```bash
 dlmrel prepare --dataset configs/datasets/ewt.yaml
 dlmrel smoke-test --model configs/models/dream_7b.yaml

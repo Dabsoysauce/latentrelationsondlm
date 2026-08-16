@@ -3,7 +3,7 @@ type: pos_probe
 track: exploratory_extensions
 steps: 64
 normalized_progress: [0.5]
-seeds: [42]
+seeds: [42, 43, 44]
 scoring:
   attender_rows: mean
   receiver_span: sum
