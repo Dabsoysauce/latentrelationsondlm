@@ -1,17 +1,12 @@
 id: masked_pos_probe
 type: pos_probe
 track: exploratory_extensions
-trajectory: teacher_forced_gold
 steps: 64
 normalized_progress: [0.5]
-seeds: [42, 43, 44, 45, 46]
+seeds: [42]
 scoring:
   attender_rows: mean
   receiver_span: sum
-  exclude_special: true
-  exclude_self: true
   top_k: 5
-  tie_break: layer_then_head
   primary_relation: object_to_verb
   primary_visibility: both_masked
-shard_size: 50

@@ -1,105 +1,83 @@
-"""Frozen receiver controls and deterministic matched alternatives."""
+"""Deterministic receiver baselines fixed without looking at test outcomes."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections import Counter
 
 import numpy as np
-import pandas as pd
+
+from .relations import Example, RelationInstance
 
 
-def valid_receivers(n_words: int, attender: int, *, exclude: Iterable[int] = ()) -> list[int]:
-    blocked = {attender, *exclude}
-    return [index for index in range(n_words) if index not in blocked]
-
-
-def uniform_receiver(candidates: list[int], *, seed: int, instance_id: str) -> int | None:
-    if not candidates:
-        return None
-    stable = sum((i + 1) * ord(char) for i, char in enumerate(instance_id))
-    return candidates[int(np.random.default_rng(seed + stable).integers(len(candidates)))]
-
-
-def nearest_receiver(candidates: list[int], attender: int) -> int | None:
-    return min(candidates, key=lambda x: (abs(x - attender), x)) if candidates else None
-
-
-def adjacent_receiver(candidates: list[int], attender: int, offset: int) -> int | None:
-    wanted = attender + offset
-    return wanted if wanted in candidates else None
-
-
-def fit_fixed_offset(frame: pd.DataFrame) -> int:
-    if frame.empty:
-        raise ValueError("cannot fit an offset on no select instances")
-    counts = frame["receiver_word_idx"].sub(frame["attender_word_idx"]).value_counts()
-    counts = counts[counts.index != 0]
-    if counts.empty:
-        raise ValueError("no nonzero offsets")
-    best_count = counts.max()
-    return int(sorted(counts[counts == best_count].index, key=lambda x: (abs(x), x))[0])
-
-
-MATCH_LEVELS = (
-    (
-        "receiver_upos",
-        "direction",
-        "distance_bin",
-        "punctuation_context",
-        "bpe_length",
-        "sentence_length_bin",
-        "treebank",
-        "timestep",
-        "visibility",
-    ),
-    (
-        "receiver_upos",
-        "direction",
-        "distance_bin",
-        "bpe_length",
-        "sentence_length_bin",
-        "treebank",
-        "timestep",
-        "visibility",
-    ),
-    ("receiver_upos", "direction", "distance_bin", "treebank", "timestep", "visibility"),
-    ("receiver_upos", "direction", "treebank", "visibility"),
-)
-
-
-@dataclass(frozen=True)
-class MatchResult:
-    alternative_id: str | None
-    level: int | None
-    matched_fields: tuple[str, ...]
-    reason: str | None
-
-
-def matched_alternative(target: pd.Series, pool: pd.DataFrame) -> MatchResult:
-    candidates = pool[
-        (pool["sentence_id"] == target["sentence_id"])
-        & (pool["instance_id"] != target["instance_id"])
-        & (pool["receiver_word_idx"] != target["receiver_word_idx"])
+def matched_word(
+    example: Example, instance: RelationInstance, candidates: list[int]
+) -> tuple[int | None, int | None]:
+    """Find a wrong same-POS receiver using a frozen three-level relaxation."""
+    alternatives = [
+        word
+        for word in candidates
+        if word != instance.receiver_word_idx and example.upos[word] == instance.receiver_upos
     ]
-    for level, fields in enumerate(MATCH_LEVELS):
-        usable = [field for field in fields if field in pool and field in target.index]
-        matched = candidates
-        for field in usable:
-            matched = matched[matched[field] == target[field]]
-        if not matched.empty:
-            best = matched.sort_values("instance_id", kind="mergesort").iloc[0]
-            return MatchResult(str(best["instance_id"]), level, tuple(usable), None)
-    return MatchResult(None, None, (), "no_candidate_after_frozen_relaxation")
+    rules = (
+        lambda word: (
+            np.sign(word - instance.attender_word_idx)
+            == np.sign(instance.receiver_word_idx - instance.attender_word_idx)
+            and abs(abs(word - instance.attender_word_idx) - abs(instance.word_distance)) <= 1
+        ),
+        lambda word: (
+            np.sign(word - instance.attender_word_idx)
+            == np.sign(instance.receiver_word_idx - instance.attender_word_idx)
+        ),
+        lambda word: True,
+    )
+    for level, rule in enumerate(rules):
+        admitted = [word for word in alternatives if rule(word)]
+        if admitted:
+            return min(
+                admitted,
+                key=lambda word: (
+                    abs(abs(word - instance.attender_word_idx) - abs(instance.word_distance)),
+                    word,
+                ),
+            ), level
+    return None, None
 
 
-def paired_mass_statistics(gold: np.ndarray, alternative: np.ndarray) -> dict[str, float | int]:
-    if gold.shape != alternative.shape:
-        raise ValueError("paired arrays must have identical shape")
-    delta = gold - alternative
+def receiver_controls(
+    example: Example, instance: RelationInstance, candidates: list[int], *, seed: int
+) -> dict:
+    """Return simple positional and POS baselines for one relation instance."""
+    attender = instance.attender_word_idx
+    receiver = instance.receiver_word_idx
+    stable = sum((index + 1) * ord(char) for index, char in enumerate(instance.instance_id))
+    uniform = candidates[int(np.random.default_rng(seed + stable).integers(len(candidates)))]
+    nearest = min(candidates, key=lambda word: (abs(word - attender), word))
+    previous = attender - 1 if attender - 1 in candidates else None
+    following = attender + 1 if attender + 1 in candidates else None
+    same_pos = [word for word in candidates if example.upos[word] == instance.receiver_upos]
+    oracle_pos = min(same_pos, key=lambda word: (abs(word - attender), word)) if same_pos else None
+    wrong_same_pos = [word for word in same_pos if word != receiver]
+    wrong_pos = min(wrong_same_pos, key=lambda word: (abs(word - attender), word)) if wrong_same_pos else None
     return {
-        "p_gold_greater": float(np.mean(delta > 0)) if len(delta) else float("nan"),
-        "mean_paired_difference": float(np.mean(delta)) if len(delta) else float("nan"),
-        "ties": int(np.sum(delta == 0)),
-        "n": int(len(delta)),
+        "uniform_receiver_word_idx": uniform,
+        "uniform_correct": int(uniform == receiver),
+        "nearest_receiver_word_idx": nearest,
+        "nearest_correct": int(nearest == receiver),
+        "previous_receiver_word_idx": previous,
+        "previous_correct": int(previous == receiver),
+        "next_receiver_word_idx": following,
+        "next_correct": int(following == receiver),
+        "oracle_pos_receiver_word_idx": oracle_pos,
+        "oracle_pos_correct": int(oracle_pos == receiver),
+        "wrong_same_pos_word_idx": wrong_pos,
+        "wrong_same_pos_correct": int(wrong_pos == receiver),
     }
+
+
+def fit_fixed_offset(offsets: list[int]) -> int | None:
+    """Choose the most common nonzero select-set offset with a fixed tie-break."""
+    counts = Counter(offset for offset in offsets if offset != 0)
+    if not counts:
+        return None
+    maximum = max(counts.values())
+    return min((offset for offset, count in counts.items() if count == maximum), key=lambda x: (abs(x), x))

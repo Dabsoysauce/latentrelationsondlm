@@ -1,116 +1,67 @@
+"""Attention concentration over the shared masking schedule."""
+
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
-import torch
 
-from ..config import Config, DiffusionConfig
-from ..data import examples_for_split
-from ..diffusion import states_at_time
-from ..relations import Example
-
-
-def _row_entropy(rows: torch.Tensor) -> torch.Tensor:
-    p = rows.float()
-    p = p / p.sum(dim=-1, keepdim=True).clamp_min(1e-12)
-    return -(p * p.clamp_min(1e-12).log()).sum(dim=-1)
+from ..config import RunConfig
+from ..data import load_manifest_examples
+from ..diffusion import attentions_at_time
+from .shared import write_frames
 
 
-def attention_entropy(
-    model,
-    tokenizer,
-    examples: list[Example],
-    cfg: DiffusionConfig,
-    diffusion_time: int | None = None,
-    log_every: int = 100,
-) -> pd.DataFrame:
-    t = cfg.steps - 1 if diffusion_time is None else diffusion_time
-    totals: dict[str, np.ndarray] = {}
-    n_rows = 0
-
-    for i, example in enumerate(examples):
-        attentions, _, state = states_at_time(
-            model,
-            tokenizer,
-            example.text,
-            diffusion_time=t,
-            steps=cfg.steps,
-            seed=cfg.seed,
-            include_bos=cfg.include_bos,
-        )
-        seq_len = len(state.tokens)
-        if seq_len < 3:
-            continue
-
-        stacked = torch.stack([a[0].float() for a in attentions])
-        raw = _row_entropy(stacked)
-
-        no_sink = stacked.clone()
-        no_sink[:, :, :, 0] = 0.0
-        trimmed = _row_entropy(no_sink)
-
-        if not totals:
-            shape = (stacked.shape[0], stacked.shape[1])
-            totals = {
-                "entropy": np.zeros(shape),
-                "entropy_norm": np.zeros(shape),
-                "entropy_no_sink": np.zeros(shape),
-                "sink_mass": np.zeros(shape),
-            }
-
-        denom = float(np.log(seq_len))
-        totals["entropy"] += raw.mean(dim=-1).cpu().numpy()
-        totals["entropy_norm"] += (raw / denom).mean(dim=-1).cpu().numpy()
-        totals["entropy_no_sink"] += trimmed.mean(dim=-1).cpu().numpy()
-        totals["sink_mass"] += stacked[:, :, :, 0].mean(dim=-1).cpu().numpy()
-        n_rows += 1
-
-        if log_every and (i + 1) % log_every == 0:
-            print(f"[entropy] {i + 1}/{len(examples)} sentences", flush=True)
-
-    if not n_rows:
-        return pd.DataFrame()
-
+def run(model, tokenizer, cfg: RunConfig, run_dir: Path) -> dict[str, Any]:
+    examples, exclusions = load_manifest_examples(cfg, tokenizer, "test")
     rows = []
-    n_layers, n_heads = totals["entropy"].shape
-    for layer in range(n_layers):
-        for head in range(n_heads):
-            rows.append(
-                {
-                    "layer": layer,
-                    "head": head,
-                    "entropy": totals["entropy"][layer, head] / n_rows,
-                    "entropy_norm": totals["entropy_norm"][layer, head] / n_rows,
-                    "entropy_no_sink": totals["entropy_no_sink"][layer, head] / n_rows,
-                    "sink_mass": totals["sink_mass"][layer, head] / n_rows,
-                    "n_sentences": n_rows,
-                    "diffusion_time": t,
-                }
-            )
-    return pd.DataFrame(rows)
-
-
-def run(model, tokenizer, cfg: Config, out: Path) -> None:
-    out.mkdir(parents=True, exist_ok=True)
-    examples = examples_for_split(cfg, tokenizer, "test")
-    if cfg.diffusion.n_probe_sentences is not None:
-        examples = examples[: cfg.diffusion.n_probe_sentences]
-
-    if cfg.diffusion.timesteps:
-        timesteps = cfg.diffusion.timesteps
-    else:
-        timesteps = sorted(
-            {
-                round(progress * (cfg.diffusion.steps - 1))
-                for progress in (0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0)
-            }
-        )
-    tables = [
-        attention_entropy(model, tokenizer, examples, cfg.diffusion, timestep) for timestep in timesteps
-    ]
-    table = pd.concat([item for item in tables if not item.empty], ignore_index=True)
-    table["normalized_progress"] = table["diffusion_time"] / max(cfg.diffusion.steps - 1, 1)
-    table.to_csv(out / "attention_entropy.csv", index=False)
-    print(table.groupby("layer")[["entropy_norm", "entropy_no_sink", "sink_mass"]].mean().to_string())
+    for seed in cfg.experiment.seeds:
+        for progress in cfg.experiment.normalized_progress:
+            timestep = round(progress * (cfg.experiment.steps - 1))
+            for example in examples:
+                attentions, state = attentions_at_time(
+                    model, tokenizer, example.text, timestep, cfg.experiment.steps, seed, True
+                )
+                for layer, attention in enumerate(attentions):
+                    probability = attention[0].float()
+                    probability /= probability.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+                    entropy = -(probability * probability.clamp_min(1e-12).log()).sum(dim=-1)
+                    no_bos = probability.clone()
+                    no_bos[:, :, 0] = 0
+                    no_bos /= no_bos.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+                    entropy_no_bos = -(no_bos * no_bos.clamp_min(1e-12).log()).sum(dim=-1)
+                    valid_keys = probability.shape[-1]
+                    for head in range(probability.shape[0]):
+                        rows.append(
+                            {
+                                "sentence_id": example.sentence_id,
+                                "treebank": example.source,
+                                "seed": seed,
+                                "timestep": timestep,
+                                "normalized_progress": progress,
+                                "layer": layer,
+                                "head": head,
+                                "entropy": float(entropy[head].mean()),
+                                "entropy_normalized": float(entropy[head].mean() / np.log(valid_keys)),
+                                "entropy_no_bos": float(entropy_no_bos[head].mean()),
+                                "bos_sink_mass": float(probability[head, :, 0].mean()),
+                                "valid_key_count": valid_keys,
+                                "n_masked": state.n_masked,
+                            }
+                        )
+    raw = pd.DataFrame(rows)
+    write_frames(run_dir, raw=raw, exclusions=exclusions)
+    group = ["seed", "treebank", "timestep", "normalized_progress", "layer", "head"]
+    per_seed = raw.groupby(group, as_index=False).mean(numeric_only=True)
+    per_seed.to_csv(run_dir / "per_seed_metrics.csv", index=False)
+    metrics = per_seed.groupby(group[1:], as_index=False).agg(
+        entropy_mean=("entropy", "mean"),
+        entropy_normalized=("entropy_normalized", "mean"),
+        entropy_no_bos=("entropy_no_bos", "mean"),
+        bos_sink_mass=("bos_sink_mass", "mean"),
+        n_seeds=("seed", "nunique"),
+    )
+    metrics.to_csv(run_dir / "metrics.csv", index=False)
+    return {"n_rows": len(raw), "n_sentences": len(examples)}

@@ -69,18 +69,17 @@ def _is_wrapper_checkpoint(name: str, revision: str | None = None) -> bool:
         return False
 
 
-def _wrapper_key_map(key: str, family: str) -> str | None:
-    body = "transformer" if family == "diffugpt" else "model"
+def _wrapper_key_map(key: str) -> str | None:
     if key.startswith("denoise_model."):
-        return f"{body}.{key[len('denoise_model.') :]}"
+        return f"model.{key[len('denoise_model.') :]}"
     if key == "embed_tokens.weight":
-        return f"{body}.wte.weight" if family == "diffugpt" else f"{body}.embed_tokens.weight"
+        return "model.embed_tokens.weight"
     if key.startswith("lm_head."):
         return key
     return None
 
 
-def _load_wrapper_checkpoint(cls, name: str, family: str, hf_config, dtype, revision: str):
+def _load_wrapper_checkpoint(cls, name: str, hf_config, dtype, revision: str):
     from huggingface_hub import hf_hub_download, list_repo_files
     from safetensors.torch import load_file
 
@@ -91,7 +90,7 @@ def _load_wrapper_checkpoint(cls, name: str, family: str, hf_config, dtype, revi
 
     remapped, dropped = {}, []
     for key, value in state.items():
-        target = _wrapper_key_map(key, family)
+        target = _wrapper_key_map(key)
         if target is None:
             dropped.append(key)
         else:
@@ -128,10 +127,10 @@ def _assert_pretrained_weights_loaded(backbone, name: str, revision: str | None 
     )
 
 
-def load_backbone(cls, name: str, family: str, hf_config, dtype, **extra):
+def load_backbone(cls, name: str, hf_config, dtype, **extra):
     revision = extra.get("revision")
     if _is_wrapper_checkpoint(name, revision):
-        return _load_wrapper_checkpoint(cls, name, family, hf_config, dtype, revision)
+        return _load_wrapper_checkpoint(cls, name, hf_config, dtype, revision)
 
     attempts = [
         {"dtype": dtype, "attn_implementation": hf_config._attn_implementation},
@@ -159,7 +158,6 @@ class WrappedAdapter(ModelAdapter, torch.nn.Module):
         logits=True,
         hidden_states=True,
         attentions=True,
-        native_timestep=True,
     )
 
     def __init__(self, ddm, tokenizer, device: str):
@@ -204,7 +202,7 @@ class WrappedAdapter(ModelAdapter, torch.nn.Module):
         return None, out.attentions
 
 
-def load_wrapped(family: str, backbone_cls_name: str, model_cfg: dict, adapter_cls):
+def load_diffullama(model_cfg: dict, adapter_cls):
     code_revision = model_cfg["remote_code_revision"]
     ensure_diffullama_repo(code_revision)
     from transformers import AutoConfig, AutoTokenizer
@@ -222,9 +220,10 @@ def load_wrapped(family: str, backbone_cls_name: str, model_cfg: dict, adapter_c
 
     import transformers
 
-    backbone_cls = getattr(transformers, backbone_cls_name)
-    extra = {"device_map": "auto"} if family == "diffullama" else {}
-    backbone = load_backbone(backbone_cls, checkpoint, family, hf_config, dtype, revision=revision, **extra)
+    backbone_cls = transformers.LlamaForCausalLM
+    backbone = load_backbone(
+        backbone_cls, checkpoint, hf_config, dtype, revision=revision, device_map="auto"
+    )
 
     try:
         from model import DiscreteDiffusionModel

@@ -16,6 +16,7 @@ def test_timestep_is_not_collapsed():
         [
             {
                 "relation": "r",
+                "treebank": "ewt",
                 "layer": 0,
                 "head": 0,
                 "seed": 42,
@@ -26,6 +27,7 @@ def test_timestep_is_not_collapsed():
             },
             {
                 "relation": "r",
+                "treebank": "ewt",
                 "layer": 0,
                 "head": 0,
                 "seed": 42,
@@ -36,6 +38,6 @@ def test_timestep_is_not_collapsed():
             },
         ]
     )
-    output = aggregate_curve(frame, min_masked=1)
+    _, output = aggregate_curve(frame)
     assert output["timestep"].tolist() == [0, 8]
     assert output["accuracy_mean"].tolist() == [0.0, 1.0]

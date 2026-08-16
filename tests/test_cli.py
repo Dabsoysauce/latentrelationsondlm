@@ -23,7 +23,14 @@ def test_run_dry_run_does_not_load_model(capsys):
 
 
 def test_documented_command_surface_parses(capsys):
-    code = main(["status", "--results", str(ROOT / "results")])
+    code = main(
+        [
+            "smoke-test",
+            "--model",
+            str(ROOT / "configs/models/fake.yaml"),
+            "--dry-run",
+        ]
+    )
     assert code == 0
 
 
@@ -34,7 +41,7 @@ def test_external_transfer_requires_non_ewt_and_lock(capsys):
             "--model",
             str(ROOT / "configs/models/fake.yaml"),
             "--dataset",
-            str(ROOT / "configs/datasets/gum.yaml"),
+            str(ROOT / "configs/datasets/de_gsd.yaml"),
             "--experiment",
             str(ROOT / "configs/experiments/external_transfer.yaml"),
             "--dry-run",

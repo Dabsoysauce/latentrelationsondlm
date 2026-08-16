@@ -28,7 +28,6 @@ REQUIRED_RUN_FILES = {
     "per_seed_metrics.csv",
     "metrics.csv",
     "summary.json",
-    "validation.json",
 }
 
 

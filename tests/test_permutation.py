@@ -1,6 +1,6 @@
 import pandas as pd
 
-from dlmrel.pipeline import selection_aware_permutation
+from dlmrel.experiments.shared import selection_aware_permutation
 
 
 def _rows(role):

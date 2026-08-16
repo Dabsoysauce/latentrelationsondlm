@@ -1,4 +1,4 @@
-"""Strict, serializable configuration for rigorous and legacy tracks."""
+"""One strict configuration schema for every active experiment."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import yaml
 
 SCHEMA_VERSION = "dlmrel-config-v2"
 TRACKS = (
-    "legacy_reproduction",
     "confirmatory_ewt",
     "external_treebank_transfer",
     "exploratory_extensions",
@@ -64,34 +63,11 @@ class DatasetConfig:
                 raise ConfigError("dataset checksums must be sha256:<hex> for train/dev/test")
 
 
-@dataclass
-class TreebankConfig:
-    """Compatibility config used only by the explicitly legacy loader."""
-
-    treebanks: list[str] = field(default_factory=lambda: ["UD_English-EWT"])
-    cache_dir: str = "data/ud"
-    n_select: int | None = 4000
-    n_dev: int | None = 1000
-    n_test: int | None = 1000
-    max_seq_len: int = 128
-    min_seq_len: int = 4
-    shuffle: bool = True
-    seed: int = 42
-    skip_multiword: bool = True
-    require_full_alignment: bool = True
-    common_pool_models: list[str] = field(default_factory=list)
-    dedupe_by_text: bool = True
-
-
 @dataclass(frozen=True)
 class CapabilityConfig:
     logits: bool = False
     hidden_states: bool = False
     attentions: bool = False
-    native_timestep: bool = False
-    head_residuals: bool = False
-    head_ablation: bool = False
-    native_generation: bool = False
 
 
 @dataclass(frozen=True)
@@ -118,10 +94,7 @@ class ModelConfig:
 class ScoringConfig:
     attender_rows: str = "mean"
     receiver_span: str = "sum"
-    exclude_special: bool = True
-    exclude_self: bool = True
     top_k: int = 5
-    tie_break: str = "layer_then_head"
     primary_relation: str = "object_to_verb"
     primary_visibility: str = "both_masked"
 
@@ -138,20 +111,16 @@ class ScoringConfig:
 class ExperimentConfig:
     id: str = "head_search"
     type: str = "head_search"
-    trajectory: str = "teacher_forced_gold"
     steps: int = 64
     normalized_progress: list[float] = field(
         default_factory=lambda: [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
     )
     seeds: list[int] = field(default_factory=lambda: [42, 43, 44, 45, 46])
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
-    shard_size: int = 100
 
     def validate(self) -> None:
-        if self.trajectory not in {"teacher_forced_gold", "native_generated", "static_final"}:
-            raise ConfigError("unknown trajectory")
-        if not self.seeds or self.steps < 1 or self.shard_size < 1:
-            raise ConfigError("experiment seeds, steps, and shard_size must be positive")
+        if not self.seeds or self.steps < 1:
+            raise ConfigError("experiment seeds and steps must be positive")
         if any(x < 0 or x > 1 for x in self.normalized_progress):
             raise ConfigError("normalized progress must lie in [0, 1]")
         self.scoring.validate()
@@ -163,35 +132,7 @@ class RuntimeConfig:
     run_id: str | None = None
     resume: bool = False
     dry_run: bool = False
-    workers: int = 1
     selection_lock: str | None = None
-
-
-@dataclass
-class DiffusionConfig:
-    """Compatibility surface for the legacy experiment implementations."""
-
-    steps: int = 64
-    seed: int = 42
-    seeds: list[int] = field(default_factory=lambda: [42, 43, 44, 45, 46])
-    include_bos: bool = True
-    exclude_bos: bool = True
-    exclude_self: bool = True
-    attender_token: str = "last"
-    min_masked_positions: int = 25
-    timestep_stride: int = 1
-    n_curve_sentences: int | None = None
-    timesteps: list[int] | None = None
-    n_probe_sentences: int | None = 400
-    probe_layer_stride: int = 4
-
-
-@dataclass
-class AnalysisConfig:
-    offset_range: tuple[int, int] = (-15, 15)
-    n_bootstrap: int = 10_000
-    ci: float = 0.95
-    distance_bins: list[int] = field(default_factory=lambda: [1, 2, 3, 5, 8, 100])
 
 
 @dataclass(frozen=True)
@@ -215,17 +156,15 @@ class RunConfig:
             raise ConfigError("confirmatory_ewt track requires the EWT dataset")
         if self.track == "external_treebank_transfer" and self.dataset.id == "ewt":
             raise ConfigError("external transfer requires a non-EWT dataset")
-        if self.model.family == "gpt2" and self.experiment.trajectory != "static_final":
-            raise ConfigError("GPT-2 supports static_final experiments only")
         required = {
             "head_search": "attentions",
             "time_curve": "attentions",
             "attention_entropy": "attentions",
             "pos_probe": "hidden_states",
             "logit_lens": "logits",
-            "dla": "head_residuals",
-            "ablation": "head_ablation",
         }
+        if self.experiment.type not in required:
+            raise ConfigError(f"unsupported experiment type: {self.experiment.type!r}")
         capability = required.get(self.experiment.type)
         if capability and not getattr(self.model.capabilities, capability):
             raise ConfigError(f"experiment {self.experiment.type!r} requires model capability {capability!r}")
@@ -259,35 +198,6 @@ class RunConfig:
 
     def save(self, path: str | Path) -> None:
         atomic_yaml(path, self.to_dict())
-
-
-@dataclass
-class Config:
-    """Legacy aggregate retained for historical reproduction only."""
-
-    treebank: TreebankConfig = field(default_factory=TreebankConfig)
-    model: ModelConfig = field(default_factory=ModelConfig)
-    diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
-    analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
-    out_dir: str = "results/run"
-
-    @classmethod
-    def load(cls, path: str | Path) -> Config:
-        raw = _read_yaml(path)
-        _reject_unknown(cls, raw, "legacy config")
-        return cls(
-            treebank=_strict_dataclass(TreebankConfig, raw.get("treebank", {}), "treebank"),
-            model=_strict_dataclass(ModelConfig, raw.get("model", {}), "model"),
-            diffusion=_strict_dataclass(DiffusionConfig, raw.get("diffusion", {}), "diffusion"),
-            analysis=_strict_dataclass(AnalysisConfig, raw.get("analysis", {}), "analysis"),
-            out_dir=raw.get("out_dir", "results/run"),
-        )
-
-    def save(self, path: str | Path) -> None:
-        atomic_yaml(path, asdict(self))
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 T = TypeVar("T")

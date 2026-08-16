@@ -11,7 +11,3 @@ capabilities:
   logits: true
   hidden_states: true
   attentions: true
-  native_timestep: true
-  head_residuals: false
-  head_ablation: false
-  native_generation: false

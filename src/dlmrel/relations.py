@@ -10,7 +10,6 @@ rather than recovered later.
 from __future__ import annotations
 
 import hashlib
-from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,10 +18,9 @@ from conllu.models import TokenList
 from .alignment import (
     align_words_to_tokens,
     find_char_spans,
-    has_multiword_tokens,
     syntactic_tokens,
 )
-from .config import NOUN_UPOS, OBJECT_DEPS, SUBJECT_DEPS, VERB_UPOS, TreebankConfig
+from .config import NOUN_UPOS, OBJECT_DEPS, SUBJECT_DEPS, VERB_UPOS, DatasetConfig
 
 
 @dataclass
@@ -181,20 +179,20 @@ def _ancestor_depth(tokens: list, id_to_idx: dict[int, int], start: int) -> int:
 def build_example(
     sentence: TokenList,
     tokenizer,
-    cfg: TreebankConfig,
+    cfg: DatasetConfig,
     include_bos: bool = True,
+    max_subtokens: int = 128,
 ) -> Example | None:
     """Convert one CoNLL-U sentence into an Example, or None if unusable."""
-    if cfg.skip_multiword and has_multiword_tokens(sentence):
-        return None
-
     text = sentence.metadata.get("text")
     if not text:
         return None
 
     tokens, id_to_idx = syntactic_tokens(sentence)
     forms = [tok.get("form") for tok in tokens]
-    if not forms:
+    if len(forms) < cfg.min_words:
+        return None
+    if cfg.max_words is not None and len(forms) > cfg.max_words:
         return None
 
     char_spans = find_char_spans(text, forms)
@@ -203,11 +201,11 @@ def build_example(
 
     seq_len = len(tokenizer(text, add_special_tokens=False)["input_ids"])
     seq_len += 1 if include_bos else 0
-    if not (cfg.min_seq_len <= seq_len <= cfg.max_seq_len):
+    if seq_len > max_subtokens:
         return None
 
     word_to_tokens = align_words_to_tokens(text, char_spans, tokenizer, include_bos)
-    if cfg.require_full_alignment and len(word_to_tokens) < len(tokens):
+    if len(word_to_tokens) < len(tokens):
         return None
 
     relations = extract_relations(tokens, id_to_idx, word_to_tokens)
@@ -233,73 +231,3 @@ def build_example(
         sentence_id=stable_sentence_id,
         original_split=str(sentence.metadata.get("source_split") or ""),
     )
-
-
-def build_examples(
-    sentences: list[TokenList],
-    tokenizer,
-    cfg: TreebankConfig,
-    include_bos: bool = True,
-    limit: int | None = None,
-    tag: str = "",
-) -> list[Example]:
-    """Filter and convert a list of sentences, reporting why sentences drop out."""
-    examples: list[Example] = []
-    dropped = 0
-    for sentence in sentences:
-        example = build_example(sentence, tokenizer, cfg, include_bos)
-        if example is None:
-            dropped += 1
-            continue
-        examples.append(example)
-        if limit is not None and len(examples) >= limit:
-            break
-
-    counts = Counter(inst.relation for ex in examples for inst in ex.relations)
-    print(f"[relations] {tag}: {len(examples)} usable, {dropped} dropped")
-    print(f"[relations] {tag}: instances {dict(counts)}")
-    return examples
-
-
-def relations_to_records(examples: list[Example], split: str) -> list[dict]:
-    """Flatten to rows for the audit CSV that every downstream analysis reads."""
-    rows = []
-    for si, ex in enumerate(examples):
-        for inst in ex.relations:
-            rows.append(
-                {
-                    "split": split,
-                    "sentence_idx": si,
-                    "sentence": ex.text,
-                    "source": ex.source,
-                    "sentence_id": ex.sentence_id,
-                    "language": ex.language,
-                    "original_split": ex.original_split,
-                    "instance_id": inst.instance_id,
-                    "relation": inst.relation,
-                    "attender_text": inst.attender_text,
-                    "receiver_text": inst.receiver_text,
-                    "dep": inst.dep,
-                    "attender_span": inst.attender_span,
-                    "receiver_span": inst.receiver_span,
-                    "attender_word_idx": inst.attender_word_idx,
-                    "receiver_word_idx": inst.receiver_word_idx,
-                    "word_distance": inst.word_distance,
-                    "signed_direction": "right" if inst.word_distance > 0 else "left",
-                    "attender_upos": inst.attender_upos,
-                    "receiver_upos": inst.receiver_upos,
-                    "punctuation_between": inst.punctuation_between,
-                    "clause_depth": inst.clause_depth,
-                    "embedded_clause": inst.embedded_clause,
-                    "coordinated": inst.coordinated,
-                    "relative_clause": inst.relative_clause,
-                    "passive_voice": inst.passive_voice,
-                    "intervening_verbs": inst.intervening_verbs,
-                    "intervening_nouns": inst.intervening_nouns,
-                    "sentence_length_words": len(ex.tokens),
-                    "sentence_length_subtokens": ex.seq_len,
-                    "attender_bpe_length": len(inst.attender_span),
-                    "receiver_bpe_length": len(inst.receiver_span),
-                }
-            )
-    return rows

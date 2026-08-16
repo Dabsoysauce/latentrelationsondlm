@@ -1,69 +1,52 @@
 # Latent relations in diffusion language models
 
-This repository tests whether diffusion language models encode UD dependency
-relations in attention, representations, logits, and causal behavior. The
-rigorous pipeline separates historical reproduction, confirmatory EWT testing,
-locked external-treebank transfer, and exploratory extensions.
+This repository reruns the Dream-7B and DiffuLLaMA-7B experiments with one
+auditable protocol. The active datasets are English EWT, German GSD, and
+Japanese GSD. The active analyses are head search, locked transfer, time
+curves, attention entropy, logit lens, and masked POS probing.
 
-Current claim status: historical evidence supports a DiffuGPT-S
-object-to-verb attention motif, including a reported pre-unmask effect. The
-archived preliminary larger-model results do **not** yet establish that effect,
-locked cross-treebank transfer, or causal necessity. Those claims require the
-GPU gates and full runs documented below.
+The earlier Dream and DiffuLLaMA outputs are preliminary because they were
+produced before official split preservation, select/dev/test head locking, and
+the current controls and provenance records. They are preserved outside the
+active branch and will be rerun; they are not used as final evidence. DiffuGPT
+belongs to older work and is not part of this rerun.
 
-## Install
-
-Core CPU validation:
+## Install and verify
 
 ```powershell
 py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev,probe]"
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 .\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m ruff check .
 ```
 
-Install one model-specific requirements file in a separate environment. Dream
-and DiffuLLaMA intentionally use incompatible Transformers versions.
+Dream and DiffuLLaMA require separate GPU environments because they use
+different pinned Transformers versions. See [RUNNING.md](docs/RUNNING.md).
 
-## Quickstart
+## Five commands
 
 ```powershell
-dlmrel data audit --dataset configs/datasets/ewt.yaml
-dlmrel model smoke-test --model configs/models/diffugpt.yaml --dry-run
-dlmrel run --model configs/models/fake.yaml --dataset configs/datasets/ewt.yaml --experiment configs/experiments/head_search.yaml --dry-run
-dlmrel status --results results
+dlmrel prepare --dataset configs/datasets/ewt.yaml
+dlmrel smoke-test --model configs/models/dream_7b.yaml
+dlmrel run --model configs/models/dream_7b.yaml --dataset configs/datasets/ewt.yaml --experiment configs/experiments/head_search.yaml --run-id dream-ewt-v1
+dlmrel validate --run-dir results/confirmatory_ewt/dream_7b/ewt/confirmatory_head_search/dream-ewt-v1
+dlmrel compare --runs <dream-run> <diffullama-run> --output results/comparison.csv
 ```
 
-Remove `--dry-run` only in the appropriate environment. Every non-dry run uses
-`results/<track>/<model>/<dataset>/<experiment>/<run_id>/` and refuses to
-overwrite a completed run. Use `--run-id <id> --resume` for deterministic
-resumption.
+Every real run records its exact model and dataset revisions, configuration,
+command, environment, manifests, exclusions, raw rows, seed summaries, and
+validation result. Completed runs cannot be silently overwritten.
 
-## Capability matrix
+## Repository map
 
-| Model | Logits/hidden | Attention | DLA/ablation | Denoising time | Status |
-|---|---:|---:|---:|---:|---|
-| Fake CPU | yes | yes | yes | synthetic | CPU test harness |
-| DiffuGPT-S | yes | yes | gated | yes | GPU gate not run |
-| DiffuLLaMA | yes | yes | gated | yes | GPU gate not run |
-| Dream-7B | yes | yes | gated | analysis schedule | GPU gate not run |
-| LLaDA-8B | yes | disabled | disabled | yes | attention parity not run |
-| GPT-2 | yes | yes | gated | not applicable | final-state baseline |
+```text
+configs/      Three datasets, two research models, six analyses
+notebooks/    Colab GPU launcher
+src/dlmrel/   Data, model, experiment, statistics, and artifact code
+tests/        Methodological and software checks
+docs/         Protocol, running instructions, and verified status
+```
 
-“Gated” means the adapter does not advertise the capability until a validated
-intervention/decomposition is available. GPT-2 is never used for masked-state
-or denoising claims.
-
-## Protocol and guides
-
-- [Frozen experiment protocol](docs/experiment_protocol.md)
-- [Treebanks and immutable revisions](docs/treebanks.md)
-- [Model adapters and environments](docs/model_adapters.md)
-- [Result schemas](docs/result_format.md)
-- [Legacy reproduction](docs/reproduction.md)
-- [Colab guide](docs/colab_guide.md)
-- [Modal guide](docs/modal_guide.md)
-- [Implementation status](docs/implementation_status.md)
-
-Historical outputs live under
-`results/reference_legacy/pre_rigorous_6e5aaec/` with explicit provenance.
-They are regression references, not confirmatory results.
+- [Frozen protocol](docs/PROTOCOL.md)
+- [How to run the GPU experiments](docs/RUNNING.md)
+- [Implementation and preliminary-result status](docs/STATUS.md)

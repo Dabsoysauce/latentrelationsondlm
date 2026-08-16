@@ -1,6 +1,6 @@
 import pandas as pd
 
-from dlmrel.cli import _common_instance_comparison
+from dlmrel.evaluation.compare_models import common_instance_comparison
 
 
 def test_comparison_uses_common_instance_intersection():
@@ -22,6 +22,6 @@ def test_comparison_uses_common_instance_intersection():
             "correct": [1, 1],
         }
     )
-    output = _common_instance_comparison([first, second])
+    output = common_instance_comparison([first, second])
     assert set(output["n_common_instances"]) == {1}
     assert set(output["accuracy"]) == {0.0, 1.0}
