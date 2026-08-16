@@ -38,6 +38,82 @@ def read_source_lock(path: str | Path, cfg: RunConfig) -> SelectionLock:
     return lock
 
 
+def _attention_normalization_report(attentions) -> dict[str, Any]:
+    """Validate returned probabilities using the precision of their stored dtype."""
+    if not attentions:
+        raise ArtifactError("model returned no attention tensors")
+
+    worst: dict[str, Any] | None = None
+    worst_violation: dict[str, Any] | None = None
+    for layer_index, layer in enumerate(attentions):
+        if layer is None or not isinstance(layer, torch.Tensor):
+            raise ArtifactError(f"attention layer {layer_index} is not a tensor")
+        if layer.ndim != 4:
+            raise ArtifactError(
+                f"attention layer {layer_index} must have shape [batch, heads, query, key]; "
+                f"got {list(layer.shape)}"
+            )
+        if not layer.is_floating_point():
+            raise ArtifactError(f"attention layer {layer_index} is not floating point")
+
+        values = layer.detach().to(dtype=torch.float64)
+        if not bool(torch.isfinite(values).all()):
+            raise ArtifactError(f"attention layer {layer_index} contains non-finite values")
+        minimum = float(values.min())
+        if minimum < 0.0:
+            raise ArtifactError(
+                f"attention layer {layer_index} contains a negative probability: {minimum:.12g}"
+            )
+
+        row_sums = values.sum(dim=-1)
+        errors = (row_sums - 1.0).abs()
+        flat_index = errors.argmax()
+        coordinates = [int(value) for value in torch.unravel_index(flat_index, errors.shape)]
+        batch_index, head_index, query_index = coordinates
+        max_error = float(errors[batch_index, head_index, query_index])
+        row_sum = float(row_sums[batch_index, head_index, query_index])
+
+        # Dream returns FP32-softmax probabilities cast back to BF16. The
+        # principled bound is unit roundoff for the stored dtype, plus one
+        # FP32 epsilon for the softmax calculation itself.
+        allowed_error = float(
+            torch.finfo(layer.dtype).eps / 2 + torch.finfo(torch.float32).eps
+        )
+        candidate = {
+            "attention_row_sum_max_error": max_error,
+            "attention_row_sum_allowed_error": allowed_error,
+            "attention_row_sum_value": row_sum,
+            "attention_row_sum_dtype": str(layer.dtype),
+            "attention_row_sum_location": {
+                "layer": layer_index,
+                "batch": batch_index,
+                "head": head_index,
+                "query": query_index,
+            },
+        }
+        if worst is None or max_error > worst["attention_row_sum_max_error"]:
+            worst = candidate
+        ratio = max_error / allowed_error
+        if ratio > 1.0 and (
+            worst_violation is None or ratio > worst_violation["error_to_allowed_ratio"]
+        ):
+            worst_violation = {**candidate, "error_to_allowed_ratio": ratio}
+
+    if worst_violation is not None:
+        location = worst_violation["attention_row_sum_location"]
+        raise ArtifactError(
+            "attention rows do not sum to one: "
+            f"max_abs_error={worst_violation['attention_row_sum_max_error']:.12g}, "
+            f"allowed_error={worst_violation['attention_row_sum_allowed_error']:.12g}, "
+            f"row_sum={worst_violation['attention_row_sum_value']:.12g}, "
+            f"dtype={worst_violation['attention_row_sum_dtype']}, "
+            f"layer={location['layer']}, batch={location['batch']}, "
+            f"head={location['head']}, query={location['query']}"
+        )
+    assert worst is not None
+    return worst
+
+
 def run_real(cfg: RunConfig, run_dir: Path, manifest_hashes: dict[str, str]) -> None:
     """Dispatch one validated configuration to its sole experiment runner."""
     model, tokenizer, model_metadata = load_adapter(cfg)
@@ -98,6 +174,7 @@ def run_real(cfg: RunConfig, run_dir: Path, manifest_hashes: dict[str, str]) -> 
     atomic_json(run_dir / "run_metadata.json", metadata)
 
 
+@torch.inference_mode()
 def model_smoke_report(model, tokenizer, cfg: RunConfig, metadata: dict[str, Any]) -> dict[str, Any]:
     """Check deterministic shapes, attention normalization, and final-logit parity."""
     ids = tokenizer.encode("The chef cooked dinner.", add_special_tokens=False)
@@ -110,7 +187,7 @@ def model_smoke_report(model, tokenizer, cfg: RunConfig, metadata: dict[str, Any
     second_logits, second_attentions, second_hidden = second
     logits = model.get_logits(hidden[-1]) if logits is None else logits
     second_logits = model.get_logits(second_hidden[-1]) if second_logits is None else second_logits
-    row_error = max(float((layer.float().sum(dim=-1) - 1).abs().max()) for layer in attentions)
+    normalization = _attention_normalization_report(attentions)
     determinism = max(
         [float((logits.float() - second_logits.float()).abs().max())]
         + [
@@ -118,8 +195,6 @@ def model_smoke_report(model, tokenizer, cfg: RunConfig, metadata: dict[str, Any
             for left, right in zip(attentions, second_attentions, strict=True)
         ]
     )
-    if row_error > 1e-3:
-        raise ArtifactError("attention rows do not sum to one")
     if determinism > 1e-5:
         raise ArtifactError("model is nondeterministic in evaluation mode")
     return {
@@ -134,7 +209,7 @@ def model_smoke_report(model, tokenizer, cfg: RunConfig, metadata: dict[str, Any
         "logits_shape": list(logits.shape),
         "hidden_state_shapes": [list(value.shape) for value in hidden],
         "attention_shapes": [list(value.shape) for value in attentions],
-        "attention_row_sum_max_error": row_error,
+        **normalization,
         "determinism_max_abs_error": determinism,
         "final_depth_logit_lens_max_abs_error": float(
             (logits.float() - model.get_lm_head()(hidden[-1]).float()).abs().max()
