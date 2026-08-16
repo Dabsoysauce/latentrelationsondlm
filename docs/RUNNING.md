@@ -30,6 +30,13 @@ dlmrel run --model configs/models/dream_7b.yaml --dataset configs/datasets/ewt.y
 ```
 
 If interrupted, rerun the last command with `--resume` and the same run ID.
+Sentence-level checkpoints are written atomically every 300 processed
+sentences. Resume reuses every validated completed chunk and begins at the
+first unfinished range. Runs produced before chunking may also reuse their
+complete atomic whole-seed checkpoints; incomplete temporary files are
+ignored. A scientific change to the model, data manifests, experiment,
+three-seed list, progress points, scoring, or source selection lock is rejected
+rather than resumed.
 After head search completes, copy the path to its `selection_lock.json`. Use
 that lock for the EWT time curve and for German/Japanese transfer:
 

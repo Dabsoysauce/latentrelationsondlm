@@ -47,6 +47,14 @@ Every active experiment uses exactly three stochastic seeds: `42`, `43`, and
 `44`. The POS probe is fit, tuned on development data, and evaluated
 independently for each seed before its seed-level metrics are summarized.
 
+Scientific configuration identity includes the pinned model and revisions,
+dataset, manifest hashes, experiment, seeds, progress points, scoring, and the
+scientific contents of any source selection lock. Runtime paths, run IDs,
+`resume`, and `dry_run` are operational metadata and do not alter that
+identity. Long GPU loops write an atomic checkpoint after every 300 input
+sentences; a checkpoint is reusable only when its scientific configuration,
+manifests, stage, seed, time point, head selection, and sentence range match.
+
 ## Outputs and claims
 
 Each run contains `config.resolved.yaml`, `command.txt`, `environment.json`,

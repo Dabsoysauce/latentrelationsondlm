@@ -10,7 +10,7 @@ import pandas as pd
 from ..artifacts import SelectionLock
 from ..config import RunConfig
 from ..data import load_manifest_examples
-from .shared import atomic_parquet, score_attention_heads, write_frames
+from .shared import score_over_seeds, write_frames
 
 
 def aggregate_curve(raw: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -49,24 +49,18 @@ def run(
     frames = []
     for seed in cfg.experiment.seeds:
         for progress in cfg.experiment.normalized_progress:
-            checkpoint = run_dir / "checkpoints" / (
-                f"time-curve-seed{seed}-p{progress:.6f}-"
-                f"l{source_lock.layer}h{source_lock.head}.parquet"
+            frame = score_over_seeds(
+                model,
+                tokenizer,
+                examples,
+                cfg,
+                role="test",
+                heads={(source_lock.layer, source_lock.head)},
+                normalized_progress=progress,
+                checkpoint_dir=run_dir / "checkpoints",
+                stage="time-curve",
+                seeds=[seed],
             )
-            if checkpoint.exists():
-                frame = pd.read_parquet(checkpoint)
-            else:
-                frame = score_attention_heads(
-                    model,
-                    tokenizer,
-                    examples,
-                    cfg,
-                    role="test",
-                    heads={(source_lock.layer, source_lock.head)},
-                    normalized_progress=progress,
-                    seed=seed,
-                )
-                atomic_parquet(checkpoint, frame)
             frames.append(frame)
     raw = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     source_lock.write_once(run_dir / "selection_lock.json")

@@ -8,6 +8,7 @@ import os
 import platform
 import subprocess
 import sys
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,33 @@ class ArtifactError(RuntimeError):
 def canonical_hash(value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def selection_lock_scientific_dict(value: SelectionLock | dict[str, Any]) -> dict[str, Any]:
+    """Return lock contents without operational provenance timestamps."""
+    payload = asdict(value) if isinstance(value, SelectionLock) else deepcopy(value)
+    payload.pop("created_at", None)
+    return payload
+
+
+def selection_lock_hash(value: SelectionLock | dict[str, Any]) -> str:
+    return canonical_hash(selection_lock_scientific_dict(value))
+
+
+def scientific_configuration(
+    config: dict[str, Any], *, resolved_selection_lock_hash: str | None = None
+) -> dict[str, Any]:
+    """Remove execution-only runtime state while retaining source-lock identity."""
+    value = deepcopy(config)
+    runtime = value.pop("runtime", {}) or {}
+    lock_path = runtime.get("selection_lock")
+    if lock_path:
+        digest = resolved_selection_lock_hash
+        if digest is None:
+            lock = json.loads(Path(lock_path).read_text(encoding="utf-8"))
+            digest = selection_lock_hash(lock)
+        value["selection_lock_hash"] = digest
+    return value
 
 
 def atomic_json(path: str | Path, value: Any) -> None:
@@ -71,7 +99,8 @@ class SelectionLock:
 
     @classmethod
     def create(cls, **values: Any) -> SelectionLock:
-        return cls(schema_version=LOCK_SCHEMA, created_at=_now(), **values)
+        created_at = values.pop("created_at", None) or _now()
+        return cls(schema_version=LOCK_SCHEMA, created_at=created_at, **values)
 
     def write_once(self, path: str | Path) -> None:
         path = Path(path)
@@ -126,25 +155,57 @@ def initialize_run(
         summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
         if summary.get("completion_status") == "complete":
             raise ArtifactError("completed runs cannot be resumed or overwritten")
-    config_hash = canonical_hash(config)
+    lock_path = (config.get("runtime") or {}).get("selection_lock")
+    current_lock_hash = None
+    if lock_path:
+        current_lock_hash = selection_lock_hash(
+            json.loads(Path(lock_path).read_text(encoding="utf-8"))
+        )
+    scientific = scientific_configuration(
+        config, resolved_selection_lock_hash=current_lock_hash
+    )
+    config_hash = canonical_hash(scientific)
     resolved = path / "config.resolved.yaml"
+    metadata_path = path / "run_metadata.json"
+    existing_metadata = (
+        json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+    )
     if resolved.exists():
         existing = yaml.safe_load(resolved.read_text(encoding="utf-8"))
-        if canonical_hash(existing) != config_hash:
+        stored_lock_hash = existing_metadata.get("selection_lock_hash")
+        existing_scientific = scientific_configuration(
+            existing, resolved_selection_lock_hash=stored_lock_hash
+        )
+        if canonical_hash(existing_scientific) != config_hash:
             raise ArtifactError("resume config differs from the existing run")
     else:
         resolved.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    manifest_path = path / "manifest_refs.json"
+    if manifest_path.exists():
+        existing_manifests = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if existing_manifests != manifests:
+            raise ArtifactError("resume manifests differ from the existing run")
+    else:
+        atomic_json(manifest_path, manifests)
     (path / "command.txt").write_text(command.rstrip() + "\n", encoding="utf-8")
-    atomic_json(path / "manifest_refs.json", manifests)
     atomic_json(path / "environment.json", environment_record())
-    atomic_json(
-        path / "run_metadata.json",
+    metadata = existing_metadata
+    metadata.setdefault("started_at", _now())
+    if existing_metadata:
+        metadata["last_resumed_at"] = _now()
+    metadata.update(
         {
             "schema_version": RUN_SCHEMA,
             "config_hash": config_hash,
-            "started_at": _now(),
+            "scientific_config_hash": config_hash,
+            "selection_lock_hash": current_lock_hash,
+            "manifest_hashes_hash": canonical_hash(manifests),
             "completion_status": "running",
-        },
+        }
+    )
+    atomic_json(
+        metadata_path,
+        metadata,
     )
     (path / "checkpoints").mkdir(exist_ok=True)
     (path / "figures").mkdir(exist_ok=True)
@@ -196,10 +257,23 @@ def validate_run(path: str | Path) -> dict[str, Any]:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if metadata.get("schema_version") != RUN_SCHEMA:
             errors.append("run metadata schema mismatch")
+        manifest_path = path / "manifest_refs.json"
+        if manifest_path.exists() and metadata.get("manifest_hashes_hash") is not None:
+            manifests = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if canonical_hash(manifests) != metadata.get("manifest_hashes_hash"):
+                errors.append("manifest references hash mismatch")
         config_path = path / "config.resolved.yaml"
         if config_path.exists():
             config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            if canonical_hash(config) != metadata.get("config_hash"):
+            recorded = metadata.get("scientific_config_hash")
+            if recorded is not None:
+                scientific = scientific_configuration(
+                    config,
+                    resolved_selection_lock_hash=metadata.get("selection_lock_hash"),
+                )
+                if canonical_hash(scientific) != recorded:
+                    errors.append("resolved scientific config hash mismatch")
+            elif canonical_hash(config) != metadata.get("config_hash"):
                 errors.append("resolved config hash mismatch")
         summary_path = path / "summary.json"
         if summary_path.exists():

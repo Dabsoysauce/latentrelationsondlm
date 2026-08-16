@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from ..artifacts import ArtifactError, SelectionLock, atomic_json, canonical_hash
+from ..artifacts import (
+    ArtifactError,
+    SelectionLock,
+    atomic_json,
+    canonical_hash,
+    scientific_configuration,
+    selection_lock_hash,
+)
 from ..config import RunConfig
 from ..controls import fit_fixed_offset
 from ..data import load_manifest_examples
@@ -71,6 +79,7 @@ def run_head_search(
         if instance.relation == relation
     ]
     fixed_offset = fit_fixed_offset(offsets)
+    run_metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
     lock, select_candidates, dev_candidates = create_selection_lock(
         select_scores,
         dev_scores,
@@ -80,7 +89,7 @@ def run_head_search(
         model_id=cfg.model.id,
         model_revision=cfg.model.revision,
         dataset_id=cfg.dataset.id,
-        config_hash=canonical_hash(cfg.to_dict()),
+        config_hash=canonical_hash(scientific_configuration(cfg.to_dict())),
         select_manifest_hash=manifest_hashes["select"],
         dev_manifest_hash=manifest_hashes["dev"],
         frozen_settings={
@@ -90,6 +99,7 @@ def run_head_search(
             "selection_progress": selection_progress(cfg),
             "minimum_denominator": 25,
         },
+        created_at=run_metadata["started_at"],
     )
     write_lock_bundle(run_dir, lock, select_candidates, dev_candidates)
     select_scores.to_csv(run_dir / "select_all_head_scores.csv", index=False)
@@ -163,7 +173,7 @@ def run_locked_transfer(
     structural_slices(rows).to_csv(run_dir / "structural_slices.csv", index=False)
     return {
         "source_selection_dataset": source_lock.dataset_id,
-        "source_selection_hash": canonical_hash(asdict(source_lock)),
+        "source_selection_hash": selection_lock_hash(source_lock),
         "n_test_sentences": len(examples),
         "n_test_instances": int(rows["instance_id"].nunique()),
         "test_heads_exposed": int(rows[["layer", "head"]].drop_duplicates().shape[0]),
