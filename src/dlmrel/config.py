@@ -115,12 +115,14 @@ class ExperimentConfig:
     normalized_progress: list[float] = field(
         default_factory=lambda: [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
     )
-    seeds: list[int] = field(default_factory=lambda: [42, 43, 44, 45, 46])
+    seeds: list[int] = field(default_factory=lambda: [42, 43, 44])
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
 
     def validate(self) -> None:
-        if not self.seeds or self.steps < 1:
-            raise ConfigError("experiment seeds and steps must be positive")
+        if self.seeds != [42, 43, 44]:
+            raise ConfigError("experiment seeds must be exactly [42, 43, 44]")
+        if self.steps < 1:
+            raise ConfigError("experiment steps must be positive")
         if any(x < 0 or x > 1 for x in self.normalized_progress):
             raise ConfigError("normalized progress must lie in [0, 1]")
         self.scoring.validate()
