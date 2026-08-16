@@ -43,6 +43,10 @@ sentence are never treated as independent sentences. Seed summaries remain
 separate, selection-aware permutations repeat select-plus-dev selection, and
 Holm correction is the default if a reported family contains multiple tests.
 
+Every active experiment uses exactly three stochastic seeds: `42`, `43`, and
+`44`. The POS probe is fit, tuned on development data, and evaluated
+independently for each seed before its seed-level metrics are summarized.
+
 ## Outputs and claims
 
 Each run contains `config.resolved.yaml`, `command.txt`, `environment.json`,

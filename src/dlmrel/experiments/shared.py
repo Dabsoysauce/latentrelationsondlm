@@ -33,12 +33,11 @@ def score_attention_heads(
     role: str,
     heads: set[tuple[int, int]] | None = None,
     normalized_progress: float | None = None,
-    seed: int | None = None,
+    seed: int,
 ) -> pd.DataFrame:
     """Score all heads or one frozen subset and retain per-instance evidence."""
     progress = selection_progress(cfg) if normalized_progress is None else normalized_progress
     timestep = round(progress * (cfg.experiment.steps - 1))
-    seed = cfg.experiment.seeds[0] if seed is None else seed
     rows: list[dict[str, Any]] = []
     for sentence_index, example in enumerate(examples):
         attentions, state = attentions_at_time(
