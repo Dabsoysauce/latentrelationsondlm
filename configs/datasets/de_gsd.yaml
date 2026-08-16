@@ -1,0 +1,21 @@
+id: de_gsd
+treebank: UD_German-GSD
+language: de
+release: '2.15'
+repository: https://github.com/UniversalDependencies/UD_German-GSD
+revision: d47d56779e81203ec7a9e3460c7f5afa9f711269
+checksums:
+  train: sha256:cb1326edce0e4f61847416235611ae6a15d0fed9c8e403c355a1edd9a23b2c77
+  dev: sha256:11bd2515df2b6487833f11c2d237b8f10318c4cd2643276600242b6b2666c185
+  test: sha256:9d6776ee3a9a4897bac0b015aa78533f577f19595fb0af66b91178d1f900465f
+cache_dir: data/ud
+select_from: train
+dev_from: dev
+test_from: test
+n_select: null
+n_dev: null
+n_test: null
+seed: 42
+dedupe_normalized_text: true
+min_words: 4
+max_words: null

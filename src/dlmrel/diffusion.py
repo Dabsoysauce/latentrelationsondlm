@@ -77,15 +77,23 @@ def state_at_time(
     sentence.
     """
     if not 0 <= diffusion_time < steps:
-        raise ValueError(
-            f"diffusion_time must be in [0, {steps}), got {diffusion_time}"
-        )
+        raise ValueError(f"diffusion_time must be in [0, {steps}), got {diffusion_time}")
 
     torch.manual_seed(seed)
     np.random.seed(seed)
 
     true_ids, tokens = tokenize(tokenizer, text, model.device, include_bos)
     seq_len = true_ids.shape[1]
+
+    if tokenizer.mask_token_id is None:
+        if not getattr(model, "mask_free", False) or diffusion_time != steps - 1:
+            raise ValueError("a model without a mask token supports only its final static state")
+        return DenoisingState(
+            input_ids=true_ids,
+            tokens=tokens,
+            is_visible=[True] * seq_len,
+            unmask_step=[0] * seq_len,
+        )
 
     maskable = torch.ones_like(true_ids, dtype=torch.bool)
     if include_bos:
@@ -134,9 +142,7 @@ def attentions_at_time(
     include_bos: bool = True,
 ):
     """Return `(attentions, state)` for one sentence at one timestep."""
-    state = state_at_time(
-        model, tokenizer, text, diffusion_time, steps, seed, include_bos
-    )
+    state = state_at_time(model, tokenizer, text, diffusion_time, steps, seed, include_bos)
 
     if getattr(model, "mask_free", False):
         _, attentions = forward_with_attentions(model, state.input_ids, None)
@@ -167,14 +173,14 @@ def states_at_time(
     include_bos: bool = True,
 ):
     """Return `(attentions, hidden_states, state)` for one sentence."""
-    state = state_at_time(
-        model, tokenizer, text, diffusion_time, steps, seed, include_bos
-    )
+    state = state_at_time(model, tokenizer, text, diffusion_time, steps, seed, include_bos)
+
+    if hasattr(model, "forward_hidden_states"):
+        _, hidden = model.forward_hidden_states(state.input_ids)
+        return (), hidden, state
 
     if getattr(model, "mask_free", False):
-        _, attentions, hidden = model.forward_attentions(
-            state.input_ids, output_hidden_states=True
-        )
+        _, attentions, hidden = model.forward_attentions(state.input_ids, output_hidden_states=True)
         return attentions, hidden, state
 
     from model import get_anneal_attn_mask
@@ -223,3 +229,53 @@ def receiver_predictions(
             row[:, col] = float("-inf")
 
     return row.argmax(dim=1).cpu().numpy()
+
+
+def endpoint_visibility(is_visible: list[bool], attender_span: list[int], receiver_span: list[int]) -> str:
+    """Four mutually exclusive whole-word endpoint visibility states."""
+    attender_visible = all(is_visible[index] for index in attender_span)
+    receiver_visible = all(is_visible[index] for index in receiver_span)
+    if attender_visible and receiver_visible:
+        return "both_visible"
+    if attender_visible:
+        return "attender_visible_only"
+    if receiver_visible:
+        return "receiver_visible_only"
+    return "both_masked"
+
+
+def receiver_span_scores(
+    attentions,
+    layer: int,
+    attender_span: list[int],
+    receiver_spans: list[list[int]],
+    *,
+    row_aggregation: str = "mean",
+    span_aggregation: str = "sum",
+    excluded_positions: set[int] | None = None,
+) -> np.ndarray:
+    """Score candidates at word-span level so token count cannot win silently."""
+    rows = attentions[layer][0, :, attender_span, :].detach().float()
+    if row_aggregation == "mean":
+        rows = rows.mean(dim=1)
+    elif row_aggregation == "first":
+        rows = rows[:, 0]
+    elif row_aggregation == "last":
+        rows = rows[:, -1]
+    else:
+        raise ValueError(f"unknown row aggregation: {row_aggregation}")
+    if excluded_positions:
+        rows[:, sorted(excluded_positions)] = float("-inf")
+    values = []
+    for span in receiver_spans:
+        selected = rows[:, span]
+        if span_aggregation == "sum":
+            value = selected.sum(dim=-1)
+        elif span_aggregation == "mean":
+            value = selected.mean(dim=-1)
+        elif span_aggregation == "max":
+            value = selected.max(dim=-1).values
+        else:
+            raise ValueError(f"unknown span aggregation: {span_aggregation}")
+        values.append(value)
+    return torch.stack(values, dim=-1).cpu().numpy()

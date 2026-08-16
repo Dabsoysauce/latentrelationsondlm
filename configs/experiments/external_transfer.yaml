@@ -1,6 +1,6 @@
-id: confirmatory_head_search
+id: ewt_locked_transfer
 type: head_search
-track: confirmatory_ewt
+track: external_treebank_transfer
 steps: 64
 normalized_progress: [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
 seeds: [42, 43, 44, 45, 46]

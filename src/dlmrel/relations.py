@@ -9,7 +9,7 @@ rather than recovered later.
 
 from __future__ import annotations
 
-from collections import Counter
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,10 +18,9 @@ from conllu.models import TokenList
 from .alignment import (
     align_words_to_tokens,
     find_char_spans,
-    has_multiword_tokens,
     syntactic_tokens,
 )
-from .config import NOUN_UPOS, OBJECT_DEPS, SUBJECT_DEPS, VERB_UPOS, TreebankConfig
+from .config import NOUN_UPOS, OBJECT_DEPS, SUBJECT_DEPS, VERB_UPOS, DatasetConfig
 
 
 @dataclass
@@ -34,6 +33,17 @@ class RelationInstance:
     attender_word_idx: int
     receiver_word_idx: int
     dep: str
+    instance_id: str = ""
+    attender_upos: str = ""
+    receiver_upos: str = ""
+    punctuation_between: bool = False
+    clause_depth: int = 0
+    embedded_clause: bool = False
+    coordinated: bool = False
+    relative_clause: bool = False
+    passive_voice: bool = False
+    intervening_verbs: int = 0
+    intervening_nouns: int = 0
 
     @property
     def word_distance(self) -> int:
@@ -56,6 +66,9 @@ class Example:
     relations: list[RelationInstance]
     seq_len: int
     source: str = ""
+    sentence_id: str = ""
+    language: str = ""
+    original_split: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
 
 
@@ -112,6 +125,16 @@ def extract_relations(
         if relation is None:
             continue
 
+        between = tokens[min(i, head_i) + 1 : max(i, head_i)]
+        path_depth = _ancestor_depth(tokens, id_to_idx, i)
+        passive = str(dep or "").startswith("nsubj:pass") or any(
+            _base_dep(item.get("deprel")) == "aux" and str(item.get("deprel")).endswith(":pass")
+            for item in tokens
+            if item.get("head") == head_id
+        )
+        relation_id = hashlib.sha256(
+            f"{relation}|{i}|{head_i}|{tok.get('form')}|{head_tok.get('form')}".encode()
+        ).hexdigest()[:20]
         instances.append(
             RelationInstance(
                 relation=relation,
@@ -122,29 +145,54 @@ def extract_relations(
                 attender_word_idx=i,
                 receiver_word_idx=head_i,
                 dep=dep,
+                instance_id=relation_id,
+                attender_upos=str(tok.get("upos") or ""),
+                receiver_upos=str(head_tok.get("upos") or ""),
+                punctuation_between=any(item.get("upos") == "PUNCT" for item in between),
+                clause_depth=path_depth,
+                embedded_clause=path_depth > 1
+                or _base_dep(head_tok.get("deprel")) in {"ccomp", "xcomp", "advcl", "acl"},
+                coordinated=_base_dep(tok.get("deprel")) == "conj"
+                or _base_dep(head_tok.get("deprel")) == "conj",
+                relative_clause=str(head_tok.get("deprel") or "").startswith("acl:relcl"),
+                passive_voice=passive,
+                intervening_verbs=sum(item.get("upos") in VERB_UPOS for item in between),
+                intervening_nouns=sum(item.get("upos") in NOUN_UPOS for item in between),
             )
         )
 
     return instances
 
 
+def _ancestor_depth(tokens: list, id_to_idx: dict[int, int], start: int) -> int:
+    depth, current, seen = 0, start, set()
+    while current not in seen:
+        seen.add(current)
+        head_id = tokens[current].get("head")
+        if not isinstance(head_id, int) or head_id == 0 or head_id not in id_to_idx:
+            break
+        current = id_to_idx[head_id]
+        depth += 1
+    return depth
+
+
 def build_example(
     sentence: TokenList,
     tokenizer,
-    cfg: TreebankConfig,
+    cfg: DatasetConfig,
     include_bos: bool = True,
+    max_subtokens: int = 128,
 ) -> Example | None:
     """Convert one CoNLL-U sentence into an Example, or None if unusable."""
-    if cfg.skip_multiword and has_multiword_tokens(sentence):
-        return None
-
     text = sentence.metadata.get("text")
     if not text:
         return None
 
     tokens, id_to_idx = syntactic_tokens(sentence)
     forms = [tok.get("form") for tok in tokens]
-    if not forms:
+    if len(forms) < cfg.min_words:
+        return None
+    if cfg.max_words is not None and len(forms) > cfg.max_words:
         return None
 
     char_spans = find_char_spans(text, forms)
@@ -153,16 +201,22 @@ def build_example(
 
     seq_len = len(tokenizer(text, add_special_tokens=False)["input_ids"])
     seq_len += 1 if include_bos else 0
-    if not (cfg.min_seq_len <= seq_len <= cfg.max_seq_len):
+    if seq_len > max_subtokens:
         return None
 
     word_to_tokens = align_words_to_tokens(text, char_spans, tokenizer, include_bos)
-    if cfg.require_full_alignment and len(word_to_tokens) < len(tokens):
+    if len(word_to_tokens) < len(tokens):
         return None
 
     relations = extract_relations(tokens, id_to_idx, word_to_tokens)
     if not relations:
         return None
+
+    sent_id = str(sentence.metadata.get("sent_id") or "")
+    text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    stable_sentence_id = sent_id or f"text-{text_hash}"
+    for relation in relations:
+        relation.instance_id = f"{stable_sentence_id}:{relation.instance_id}"
 
     return Example(
         text=text,
@@ -174,55 +228,6 @@ def build_example(
         relations=relations,
         seq_len=seq_len,
         source=sentence.metadata.get("source_treebank", ""),
+        sentence_id=stable_sentence_id,
+        original_split=str(sentence.metadata.get("source_split") or ""),
     )
-
-
-def build_examples(
-    sentences: list[TokenList],
-    tokenizer,
-    cfg: TreebankConfig,
-    include_bos: bool = True,
-    limit: int | None = None,
-    tag: str = "",
-) -> list[Example]:
-    """Filter and convert a list of sentences, reporting why sentences drop out."""
-    examples: list[Example] = []
-    dropped = 0
-    for sentence in sentences:
-        example = build_example(sentence, tokenizer, cfg, include_bos)
-        if example is None:
-            dropped += 1
-            continue
-        examples.append(example)
-        if limit is not None and len(examples) >= limit:
-            break
-
-    counts = Counter(inst.relation for ex in examples for inst in ex.relations)
-    print(f"[relations] {tag}: {len(examples)} usable, {dropped} dropped")
-    print(f"[relations] {tag}: instances {dict(counts)}")
-    return examples
-
-
-def relations_to_records(examples: list[Example], split: str) -> list[dict]:
-    """Flatten to rows for the audit CSV that every downstream analysis reads."""
-    rows = []
-    for si, ex in enumerate(examples):
-        for inst in ex.relations:
-            rows.append(
-                {
-                    "split": split,
-                    "sentence_idx": si,
-                    "sentence": ex.text,
-                    "source": ex.source,
-                    "relation": inst.relation,
-                    "attender_text": inst.attender_text,
-                    "receiver_text": inst.receiver_text,
-                    "dep": inst.dep,
-                    "attender_span": inst.attender_span,
-                    "receiver_span": inst.receiver_span,
-                    "attender_word_idx": inst.attender_word_idx,
-                    "receiver_word_idx": inst.receiver_word_idx,
-                    "word_distance": inst.word_distance,
-                }
-            )
-    return rows

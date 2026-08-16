@@ -1,273 +1,111 @@
-"""Shared data preparation and loading.
-
-Loads Universal Dependencies treebanks and builds the three disjoint splits
-every model and experiment is scored on. Two defects in the previous pipeline
-are fixed here:
-
-1. Sentences were taken by walking the treebank from the top until a quota was
-   filled. UD-EWT is ordered by genre, so the "1000 training sentences" were a
-   contiguous block of one source. Sampling is now random under a fixed seed.
-
-2. There were two splits, so head *selection* and head *evaluation* shared no
-   sentences but the selection itself was never held out. There are now three:
-   `select` (search all heads), `dev` (tune anything else), `test` (report).
-
-Splits are carved from one shuffled pool restricted to the sentences every
-model's tokenizer admits, so adding a model can only shrink the pool, never
-shift which sentences a given model sees relative to another.
-"""
+"""The single official-split data path used by every active experiment."""
 
 from __future__ import annotations
 
-import random
-import urllib.request
-from collections.abc import Iterator
+import json
+from dataclasses import asdict
 from pathlib import Path
-from urllib.error import HTTPError, URLError
+from typing import Any
 
 import pandas as pd
 from conllu import parse_incr
-from conllu.models import TokenList
 
-from .config import Config
-from .relations import Example, build_examples
-
-UD_RAW_BASE = "https://raw.githubusercontent.com/UniversalDependencies/{repo}/master"
-
-# UD file naming is `<langcode>_<treebank>-ud-<split>.conllu`; the stem differs
-# per repository, so it is resolved from the repo name.
-_STEMS = {
-    "UD_English-EWT": "en_ewt",
-    "UD_English-GUM": "en_gum",
-    "UD_English-LinES": "en_lines",
-    "UD_English-ParTUT": "en_partut",
-    "UD_English-Atis": "en_atis",
-    "UD_English-ESL": "en_esl",
-}
+from .artifacts import ArtifactError, atomic_json
+from .config import DatasetConfig, RunConfig
+from .relations import Example, build_example
+from .splits import build_official_manifests, manifest_hash
+from .treebank import acquire_split
 
 
-def treebank_stem(repo: str) -> str:
-    if repo in _STEMS:
-        return _STEMS[repo]
-    lang, _, name = repo.removeprefix("UD_").partition("-")
-    return f"{lang[:2].lower()}_{name.lower()}"
+def manifest_root(dataset: DatasetConfig) -> Path:
+    return Path("data/manifests") / dataset.id / dataset.release
 
 
-def download_conllu(repo: str, split: str, cache_dir: str | Path) -> Path:
-    """Fetch one CoNLL-U file, caching it under `cache_dir`."""
-    stem = treebank_stem(repo)
-    fname = f"{stem}-ud-{split}.conllu"
-    dest = Path(cache_dir) / repo / fname
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if not dest.exists():
-        url = f"{UD_RAW_BASE.format(repo=repo)}/{fname}"
-        print(f"[data] downloading {url}")
-        urllib.request.urlretrieve(url, dest)
-    return dest
+def prepare_manifests(dataset: DatasetConfig, *, download: bool = True) -> dict[str, Any]:
+    """Verify pinned UD files and create select/dev/test manifests."""
+    sentences = {}
+    for split in ("train", "dev", "test"):
+        path = acquire_split(dataset, split, download=download)
+        with path.open(encoding="utf-8") as stream:
+            sentences[split] = list(parse_incr(stream))
+
+    manifests = build_official_manifests(dataset, sentences)
+    root = manifest_root(dataset)
+    root.mkdir(parents=True, exist_ok=True)
+    hashes: dict[str, str] = {}
+    for role, rows in manifests.items():
+        pd.DataFrame([asdict(row) for row in rows]).to_csv(root / f"{role}.csv", index=False)
+        hashes[role] = manifest_hash(rows)
+
+    report = {
+        "schema_version": "dlmrel-manifest-v1",
+        "dataset": dataset.id,
+        "treebank": dataset.treebank,
+        "release": dataset.release,
+        "revision": dataset.revision,
+        "checksums": dataset.checksums,
+        "counts": {role: len(rows) for role, rows in manifests.items()},
+        "manifest_hashes": hashes,
+        "official_boundaries": True,
+        "zero_overlap": True,
+    }
+    atomic_json(root / "audit.json", report)
+    return report
 
 
-def iter_sentences(path: Path) -> Iterator[TokenList]:
-    with open(path, "r", encoding="utf-8") as fh:
-        yield from parse_incr(fh)
+def load_manifest_examples(
+    cfg: RunConfig, tokenizer, role: str
+) -> tuple[list[Example], pd.DataFrame]:
+    """Tokenize a frozen manifest without replacing rejected sentences."""
+    expected_split = {"select": "train", "dev": "dev", "test": "test"}.get(role)
+    if expected_split is None:
+        raise ValueError(f"unknown manifest role: {role}")
+
+    path = manifest_root(cfg.dataset) / f"{role}.csv"
+    if not path.exists():
+        raise ArtifactError(f"missing prepared manifest: {path}")
+    manifest = pd.read_csv(path)
+    if set(manifest["original_split"]) != {expected_split}:
+        raise ArtifactError(f"{role} manifest violates official {expected_split} boundary")
+
+    source_path = acquire_split(cfg.dataset, expected_split, download=False)
+    with source_path.open(encoding="utf-8") as stream:
+        sentences = list(parse_incr(stream))
+    by_sent_id = {
+        str(sentence.metadata.get("sent_id")): sentence
+        for sentence in sentences
+        if sentence.metadata.get("sent_id") is not None
+    }
+
+    examples: list[Example] = []
+    exclusions: list[dict[str, Any]] = []
+    for row in manifest.itertuples(index=False):
+        sentence = by_sent_id.get(str(row.sent_id))
+        if sentence is None:
+            exclusions.append(_exclusion(row, role, "sent_id_not_found"))
+            continue
+        sentence.metadata["source_treebank"] = cfg.dataset.treebank
+        sentence.metadata["source_split"] = expected_split
+        example = build_example(sentence, tokenizer, cfg.dataset, include_bos=True)
+        if example is None:
+            exclusions.append(_exclusion(row, role, "tokenization_alignment_or_relation_filter"))
+            continue
+        example.sentence_id = str(row.sentence_id)
+        example.language = cfg.dataset.language
+        example.original_split = expected_split
+        example.source = cfg.dataset.treebank
+        for instance in example.relations:
+            instance.instance_id = f"{row.sentence_id}:{instance.instance_id.split(':')[-1]}"
+        examples.append(example)
+    return examples, pd.DataFrame(exclusions)
 
 
-def load_treebanks(
-    repos: list[str],
-    cache_dir: str | Path,
-    splits: tuple[str, ...] = ("train", "dev", "test"),
-) -> list[TokenList]:
-    """Load every requested treebank and concatenate all CoNLL-U splits.
-
-    The UD-provided train/dev/test boundaries are deliberately discarded: this
-    study's splits are over *sentences sampled for probing*, not over the
-    original parser-training partition, and merging first means the three
-    probing splits are drawn from one homogeneous pool.
-    """
-    sentences: list[TokenList] = []
-    for repo in repos:
-        for split in splits:
-            try:
-                path = download_conllu(repo, split, cache_dir)
-            except (URLError, HTTPError, OSError) as exc:
-                print(f"[data] skipping {repo}/{split}: {exc}")
-                continue
-            n_before = len(sentences)
-            for sent in iter_sentences(path):
-                sent.metadata["source_treebank"] = repo
-                sent.metadata["source_split"] = split
-                sentences.append(sent)
-            print(f"[data] {repo}/{split}: {len(sentences) - n_before} sentences")
-    return sentences
+def load_audit(dataset: DatasetConfig) -> dict[str, Any]:
+    path = manifest_root(dataset) / "audit.json"
+    if not path.exists():
+        raise ArtifactError(f"missing prepared manifests: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def split_sentences(
-    sentences: list,
-    n_select: int | None,
-    n_dev: int | None,
-    n_test: int | None,
-    seed: int,
-    shuffle: bool = True,
-) -> dict[str, list]:
-    """Partition into three disjoint splits.
-
-    Splits are carved from a single shuffled pool, so a sentence can never
-    appear in more than one. A `None` budget takes everything left over after
-    the fixed-size splits are filled.
-    """
-    pool = list(sentences)
-    if shuffle:
-        random.Random(seed).shuffle(pool)
-
-    cursor = 0
-    out: dict[str, list] = {}
-    for name, n in (("select", n_select), ("dev", n_dev), ("test", n_test)):
-        if n is None:
-            out[name] = pool[cursor:]
-            cursor = len(pool)
-        else:
-            out[name] = pool[cursor : cursor + n]
-            cursor += n
-
-    for name, chunk in out.items():
-        print(f"[data] split {name}: {len(chunk)} sentences")
-    if cursor > len(pool):
-        raise ValueError(
-            f"requested {cursor} sentences but only {len(pool)} passed filtering; "
-            "lower the split sizes or add treebanks"
-        )
-    return out
-
-
-def load_tokenizer(name: str):
-    """AutoTokenizer, retrying with remote code for models that require it."""
-    from transformers import AutoTokenizer
-
-    try:
-        return AutoTokenizer.from_pretrained(name)
-    except Exception as exc:  # noqa: BLE001
-        print(
-            f"[data] {name}: plain tokenizer load failed "
-            f"({type(exc).__name__}); retrying with trust_remote_code=True"
-        )
-        return AutoTokenizer.from_pretrained(name, trust_remote_code=True)
-
-
-def restrict_to_texts(examples: list[Example], texts: set[str]) -> list[Example]:
-    """Keep only examples whose sentence is in `texts`, preserving pool order.
-
-    Order matters more than it looks. Splits are carved by index from a shuffled
-    pool, so if two models admit even slightly different sentence sets the index
-    alignment shifts and the splits diverge far more than the pool difference
-    suggests -- measured at 73% test-split overlap for a ~1% pool difference.
-    Filtering both models to a common pool *before* shuffling makes the two
-    sequences identical, and therefore the splits identical.
-    """
-    return [e for e in examples if e.text in texts]
-
-
-def dedupe_by_text(examples: list[Example]) -> list[Example]:
-    """Keep the first example per distinct sentence, preserving pool order.
-
-    Without this a sentence repeated in the corpus can be drawn into two
-    different splits, so the head search would be selecting on sentences it is
-    also reporting on.
-    """
-    seen: set[str] = set()
-    kept: list[Example] = []
-    for example in examples:
-        if example.text not in seen:
-            seen.add(example.text)
-            kept.append(example)
-    return kept
-
-
-def common_pool_texts(cfg: Config, sentences) -> set[str]:
-    """Sentences every model in `common_pool_models` can align and admit.
-
-    Each model is tokenized once and the results cached, keyed by the model list
-    and the filters that affect admission, because data prep runs once per model
-    and would otherwise redo this work for each.
-    """
-    import hashlib
-    import json
-
-    tc = cfg.treebank
-    fingerprint = "|".join(
-        sorted(tc.common_pool_models)
-        + [
-            str(tc.max_seq_len),
-            str(tc.min_seq_len),
-            str(tc.skip_multiword),
-            str(tc.require_full_alignment),
-            str(cfg.diffusion.include_bos),
-            ",".join(tc.treebanks),
-        ]
-    )
-    key = hashlib.sha1(fingerprint.encode()).hexdigest()[:12]
-    cache = Path(tc.cache_dir) / f"common_pool_{key}.json"
-    if cache.exists():
-        texts = set(json.loads(cache.read_text()))
-        print(f"[data] common pool: {len(texts)} sentences (cached)")
-        return texts
-
-    texts: set[str] | None = None
-    for name in sorted(tc.common_pool_models):
-        examples = build_examples(
-            sentences,
-            load_tokenizer(name),
-            tc,
-            include_bos=cfg.diffusion.include_bos,
-            tag=f"pool[{name}]",
-        )
-        admitted = {e.text for e in examples}
-        texts = admitted if texts is None else (texts & admitted)
-    texts = texts or set()
-
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps(sorted(texts)))
-    print(f"[data] common pool: {len(texts)} sentences -> {cache}")
-    return texts
-
-
-def build_all_splits(cfg: Config, tokenizer) -> dict[str, list[Example]]:
-    sentences = load_treebanks(cfg.treebank.treebanks, cfg.treebank.cache_dir)
-    usable = build_examples(
-        sentences,
-        tokenizer,
-        cfg.treebank,
-        include_bos=cfg.diffusion.include_bos,
-        tag="pool",
-    )
-    if cfg.treebank.common_pool_models:
-        before = len(usable)
-        usable = restrict_to_texts(usable, common_pool_texts(cfg, sentences))
-        print(f"[data] restricted pool {before} -> {len(usable)} sentences")
-    if cfg.treebank.dedupe_by_text:
-        before = len(usable)
-        usable = dedupe_by_text(usable)
-        print(f"[data] deduplicated {before} -> {len(usable)} sentences")
-    return split_sentences(
-        usable,
-        cfg.treebank.n_select,
-        cfg.treebank.n_dev,
-        cfg.treebank.n_test,
-        cfg.treebank.seed,
-        cfg.treebank.shuffle,
-    )
-
-
-def examples_for_split(cfg: Config, tokenizer, split: str) -> list[Example]:
-    """Rebuild one split, asserting it matches what data prep recorded."""
-    examples = build_all_splits(cfg, tokenizer)[split]
-
-    manifest = Path(cfg.out_dir) / f"sentences_{split}.csv"
-    if manifest.exists():
-        expected = pd.read_csv(manifest)["sentence"].tolist()
-        actual = [e.text for e in examples]
-        if expected != actual:
-            raise RuntimeError(
-                f"split {split!r} does not match {manifest}: "
-                f"{len(expected)} recorded vs {len(actual)} rebuilt. "
-                "The config changed since data prep ran -- rerun it."
-            )
-    return examples
+def _exclusion(row, role: str, reason: str) -> dict[str, Any]:
+    return {"sentence_id": str(row.sentence_id), "instance_id": None, "role": role, "reason": reason}

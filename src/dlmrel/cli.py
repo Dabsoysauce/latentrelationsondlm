@@ -1,151 +1,205 @@
+"""Five commands: prepare, smoke-test, run, validate, and compare."""
+
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
+import shlex
+import sys
+from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
-import pandas as pd
+import torch
 import yaml
 
-from .config import (
-    RELATION_NAMES,
-    Config,
-    DiffusionConfig,
-    ModelConfig,
-    TreebankConfig,
-)
-
-CONFIGS = Path("configs")
-RESULTS = Path("results")
-
-COMMON_POOL = [
-    "diffusionfamily/diffugpt-s",
-    "diffusionfamily/diffullama",
-    "Dream-org/Dream-v0-Base-7B",
-]
-
-EXPERIMENTS = {
-    "head_search": "dlmrel.experiments.head_search",
-    "time_curve": "dlmrel.experiments.time_curve",
-    "attention_entropy": "dlmrel.experiments.attention_entropy",
-    "logit_lens": "dlmrel.experiments.logit_lens",
-    "pos_probe": "dlmrel.experiments.pos_probe",
-}
+from .artifacts import ArtifactError, atomic_json, initialize_run, run_directory, validate_run
+from .config import ConfigError, DatasetConfig, RunConfig, RuntimeConfig, _strict_dataclass
+from .data import load_audit, manifest_root, prepare_manifests
+from .evaluation.compare_models import compare_runs
+from .fake_run import run_fake
+from .pipeline import load_adapter, model_smoke_report, run_real
 
 
-def _load_yaml(path: Path) -> dict:
-    return yaml.safe_load(path.read_text()) or {}
+def read_yaml(path: str | Path) -> dict:
+    value = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"{path} must contain a mapping")
+    return value
 
 
-def _model_config(name: str) -> dict:
-    return _load_yaml(CONFIGS / "models" / f"{name}.yaml")
+def dataset_config(path: str | Path) -> DatasetConfig:
+    dataset = _strict_dataclass(DatasetConfig, read_yaml(path), "dataset")
+    dataset.validate()
+    return dataset
 
 
-def _experiment_config(name: str) -> dict:
-    path = CONFIGS / "experiments" / f"{name}.yaml"
-    return _load_yaml(path) if path.exists() else {}
-
-
-def _build_config(model_name: str, model_cfg: dict, exp_cfg: dict) -> Config:
-    checkpoint = model_cfg.get("checkpoint", model_cfg.get("name"))
-    diffusion = DiffusionConfig()
-    if exp_cfg.get("seeds"):
-        diffusion.seeds = exp_cfg["seeds"]
-    if exp_cfg.get("timesteps"):
-        diffusion.timesteps = exp_cfg["timesteps"]
-    return Config(
-        treebank=TreebankConfig(common_pool_models=COMMON_POOL),
-        model=ModelConfig(name=checkpoint, family=model_cfg.get("adapter", "dream")),
-        diffusion=diffusion,
-        out_dir=str(RESULTS / model_name),
+def resolve_run(args) -> RunConfig:
+    runtime = RuntimeConfig(
+        results_root=args.results,
+        run_id=args.run_id,
+        resume=args.resume,
+        dry_run=args.dry_run,
+        selection_lock=args.selection_lock,
     )
+    return RunConfig.load_files(args.model, args.dataset, args.experiment, runtime=runtime)
 
 
-def cmd_prepare_data(args) -> None:
-    from .data import build_all_splits, load_tokenizer
-    from .evaluation.metrics import build_null_table, offset_distribution
-    from .relations import relations_to_records
+def cmd_prepare(args) -> None:
+    report = prepare_manifests(dataset_config(args.dataset), download=not args.no_download)
+    print(json.dumps(report, indent=2, sort_keys=True))
 
-    model_cfg = _model_config(args.model)
-    cfg = _build_config(args.model, model_cfg, {})
-    out = Path(cfg.out_dir)
-    out.mkdir(parents=True, exist_ok=True)
 
-    tokenizer = load_tokenizer(cfg.model.name)
-    splits = build_all_splits(cfg, tokenizer)
-
-    records = []
-    for name, examples in splits.items():
-        records.extend(relations_to_records(examples, name))
-        pd.DataFrame({"split": name, "sentence": [e.text for e in examples]}).to_csv(
-            out / f"sentences_{name}.csv", index=False
+def cmd_smoke_test(args) -> None:
+    runtime = RuntimeConfig(dry_run=args.dry_run)
+    cfg = RunConfig.load_files(
+        args.model,
+        args.dataset,
+        args.experiment or "configs/experiments/head_search.yaml",
+        runtime=runtime,
+    )
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "status": "dry_run",
+                    "model": cfg.model.id,
+                    "revision": cfg.model.revision,
+                    "capabilities": asdict(cfg.model.capabilities),
+                },
+                indent=2,
+            )
         )
-    frame = pd.DataFrame(records)
-    frame.to_csv(out / "relation_instances.csv", index=False)
-    cfg.save(out / "config.yaml")
-
-    table = build_null_table(
-        frame[frame["split"] == "select"],
-        frame[frame["split"] == "test"],
-        list(RELATION_NAMES),
-        cfg.analysis.offset_range,
-        cfg.diffusion.attender_token,
-        cfg.analysis.n_bootstrap,
-        cfg.analysis.ci,
-    )
-    table.to_csv(out / "offset_null.csv", index=False)
-
-    print(f"[prepare-data] {len(frame)} relation instances -> {out}")
-    print(pd.crosstab(frame["relation"], frame["split"]))
-    for relation in RELATION_NAMES:
-        dist = offset_distribution(frame, relation)
-        if not dist.empty:
-            top = ", ".join(f"{int(k):+d}:{v:.0%}" for k, v in dist.nlargest(4).items())
-            print(f"  {relation:22s} {top}")
+        return
+    if cfg.model.family == "fake":
+        output = load_adapter(cfg)[0].forward(torch.tensor([[1, 2, 3, 4]]), timestep=1)
+        report = {
+            "status": "passed",
+            "logits": list(output.logits.shape),
+            "layers": len(output.attentions or ()),
+        }
+    else:
+        model, tokenizer, metadata = load_adapter(cfg)
+        report = model_smoke_report(model, tokenizer, cfg, metadata)
+    if args.output:
+        atomic_json(args.output, report)
+    print(json.dumps(report, indent=2))
 
 
 def cmd_run(args) -> None:
-    model_cfg = _model_config(args.model)
-    exp_cfg = _experiment_config(args.experiment)
-    cfg = _build_config(args.model, model_cfg, exp_cfg)
+    cfg = resolve_run(args)
+    run_id = cfg.runtime.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    target = run_directory(
+        cfg.runtime.results_root,
+        cfg.track,
+        cfg.model.id,
+        cfg.dataset.id,
+        cfg.experiment.id,
+        run_id,
+    )
+    if cfg.runtime.dry_run:
+        print(
+            json.dumps(
+                {
+                    "valid": True,
+                    "model": cfg.model.id,
+                    "dataset": cfg.dataset.id,
+                    "experiment": cfg.experiment.id,
+                    "track": cfg.track,
+                    "output": str(target),
+                    "work": work_estimate(cfg),
+                },
+                indent=2,
+            )
+        )
+        return
 
-    adapter_mod = importlib.import_module(f"dlmrel.models.{model_cfg['adapter']}")
-    model, tokenizer, meta = adapter_mod.load(model_cfg)
+    audit = load_audit(cfg.dataset)
+    command = " ".join(shlex.quote(piece) for piece in ["dlmrel", *sys.argv[1:]])
+    initialize_run(target, cfg.to_dict(), command, audit["manifest_hashes"], resume=cfg.runtime.resume)
+    if cfg.model.family == "fake":
+        run_fake(cfg, target)
+    else:
+        run_real(cfg, target, audit["manifest_hashes"])
+    validation = validate_run(target)
+    if not validation["valid"]:
+        raise ArtifactError("run failed validation: " + "; ".join(validation["errors"]))
+    print(json.dumps({"run_dir": str(target), "validation": validation}, indent=2))
 
-    (Path(cfg.out_dir) / "model_meta.json").write_text(json.dumps(meta, indent=2))
 
-    experiment = importlib.import_module(EXPERIMENTS[args.experiment])
-    out = Path(cfg.out_dir) / args.experiment
-    experiment.run(model, tokenizer, cfg, out)
+def work_estimate(cfg: RunConfig) -> dict:
+    audit = manifest_root(cfg.dataset) / "audit.json"
+    counts = json.loads(audit.read_text(encoding="utf-8")).get("counts", {}) if audit.exists() else {}
+    sentences = sum(counts.values()) if counts else "unknown_until_prepare"
+    steps = len(cfg.experiment.normalized_progress)
+    return {
+        "sentences": sentences,
+        "trajectory_points": steps,
+        "seeds": len(cfg.experiment.seeds),
+        "estimated_forward_passes": (
+            sentences if isinstance(sentences, str) else sentences * steps * len(cfg.experiment.seeds)
+        ),
+    }
+
+
+def cmd_validate(args) -> None:
+    validation = validate_run(args.run_dir)
+    print(json.dumps(validation, indent=2))
+    if not validation["valid"]:
+        raise SystemExit(1)
 
 
 def cmd_compare(args) -> None:
-    from .evaluation.compare_models import compare
+    output, common = compare_runs(args.runs, args.output)
+    print(f"wrote {output} and {common}")
 
-    compare(args.models, args.experiment, RESULTS / "cross_model")
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="dlmrel", description="Rigorous DLM relation analysis")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    prepare = commands.add_parser("prepare", help="verify one treebank and write official manifests")
+    prepare.add_argument("--dataset", required=True)
+    prepare.add_argument("--no-download", action="store_true")
+    prepare.set_defaults(func=cmd_prepare)
+
+    smoke = commands.add_parser("smoke-test", help="verify one model adapter")
+    smoke.add_argument("--model", required=True)
+    smoke.add_argument("--dataset", default="configs/datasets/ewt.yaml")
+    smoke.add_argument("--experiment")
+    smoke.add_argument("--dry-run", action="store_true")
+    smoke.add_argument("--output")
+    smoke.set_defaults(func=cmd_smoke_test)
+
+    run = commands.add_parser("run", help="run or resume one experiment")
+    run.add_argument("--model", required=True)
+    run.add_argument("--dataset", required=True)
+    run.add_argument("--experiment", required=True)
+    run.add_argument("--results", default="results")
+    run.add_argument("--run-id")
+    run.add_argument("--resume", action="store_true")
+    run.add_argument("--selection-lock")
+    run.add_argument("--dry-run", action="store_true")
+    run.set_defaults(func=cmd_run)
+
+    validate = commands.add_parser("validate")
+    validate.add_argument("--run-dir", required=True)
+    validate.set_defaults(func=cmd_validate)
+
+    compare = commands.add_parser("compare")
+    compare.add_argument("--runs", nargs="+", required=True)
+    compare.add_argument("--output", required=True)
+    compare.set_defaults(func=cmd_compare)
+    return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="dlmrel")
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    p_data = sub.add_parser("prepare-data")
-    p_data.add_argument("--model", required=True)
-    p_data.set_defaults(func=cmd_prepare_data)
-
-    p_run = sub.add_parser("run")
-    p_run.add_argument("--model", required=True)
-    p_run.add_argument("--experiment", required=True, choices=sorted(EXPERIMENTS))
-    p_run.set_defaults(func=cmd_run)
-
-    p_cmp = sub.add_parser("compare")
-    p_cmp.add_argument("--experiment", required=True)
-    p_cmp.add_argument("--models", required=True, nargs="+")
-    p_cmp.set_defaults(func=cmd_compare)
-
-    args = parser.parse_args(argv)
-    args.func(args)
+    args = build_parser().parse_args(argv)
+    try:
+        args.func(args)
+    except (ArtifactError, ConfigError, FileNotFoundError, ValueError) as error:
+        print(f"dlmrel: error: {error}", file=sys.stderr)
+        return 2
     return 0
 
 

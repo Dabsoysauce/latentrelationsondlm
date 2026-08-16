@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from .base import ModelAdapter
+from .base import Capabilities, ModelAdapter
 
 DIFFULLAMA_REPO = "https://github.com/HKUNLP/DiffuLLaMA.git"
 
@@ -17,13 +17,16 @@ _DTYPES = {
 }
 
 
-def ensure_diffullama_repo(root: str | Path = "third_party") -> Path:
+def ensure_diffullama_repo(revision: str, root: str | Path = "third_party") -> Path:
     dest = Path(root) / "DiffuLLaMA"
     if not dest.exists():
         dest.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            ["git", "clone", "--depth", "1", DIFFULLAMA_REPO, str(dest)], check=True
-        )
+        subprocess.run(["git", "clone", "--no-checkout", DIFFULLAMA_REPO, str(dest)], check=True)
+    subprocess.run(["git", "-C", str(dest), "fetch", "--depth", "1", "origin", revision], check=True)
+    subprocess.run(["git", "-C", str(dest), "checkout", "--detach", revision], check=True)
+    actual = subprocess.check_output(["git", "-C", str(dest), "rev-parse", "HEAD"], text=True).strip()
+    if actual != revision:
+        raise RuntimeError(f"DiffuLLaMA source revision mismatch: {actual} != {revision}")
     path = str(dest.resolve())
     if path not in sys.path:
         sys.path.insert(0, path)
@@ -36,59 +39,58 @@ def _transformers_version() -> str:
     return getattr(transformers, "__version__", "unknown")
 
 
-def checkpoint_keys(name: str) -> set[str]:
+def checkpoint_keys(name: str, revision: str | None = None) -> set[str]:
     import json
     import struct
 
     from huggingface_hub import hf_hub_download, list_repo_files
 
-    files = list_repo_files(name)
+    files = list_repo_files(name, revision=revision)
     index = [f for f in files if f.endswith("safetensors.index.json")]
     if index:
-        path = hf_hub_download(name, index[0])
+        path = hf_hub_download(name, index[0], revision=revision)
         with open(path) as fh:
             return set(json.load(fh)["weight_map"])
 
     shards = [f for f in files if f.endswith(".safetensors")]
     if not shards:
         return set()
-    path = hf_hub_download(name, shards[0])
+    path = hf_hub_download(name, shards[0], revision=revision)
     with open(path, "rb") as fh:
         header_len = struct.unpack("<Q", fh.read(8))[0]
         header = json.loads(fh.read(header_len))
     return {k for k in header if k != "__metadata__"}
 
 
-def _is_wrapper_checkpoint(name: str) -> bool:
+def _is_wrapper_checkpoint(name: str, revision: str | None = None) -> bool:
     try:
-        return any(k.startswith("denoise_model.") for k in checkpoint_keys(name))
+        return any(key.startswith("denoise_model.") for key in checkpoint_keys(name, revision))
     except Exception:  # noqa: BLE001
         return False
 
 
-def _wrapper_key_map(key: str, family: str) -> str | None:
-    body = "transformer" if family == "diffugpt" else "model"
+def _wrapper_key_map(key: str) -> str | None:
     if key.startswith("denoise_model."):
-        return f"{body}.{key[len('denoise_model.'):]}"
+        return f"model.{key[len('denoise_model.') :]}"
     if key == "embed_tokens.weight":
-        return f"{body}.wte.weight" if family == "diffugpt" else f"{body}.embed_tokens.weight"
+        return "model.embed_tokens.weight"
     if key.startswith("lm_head."):
         return key
     return None
 
 
-def _load_wrapper_checkpoint(cls, name: str, family: str, hf_config, dtype):
+def _load_wrapper_checkpoint(cls, name: str, hf_config, dtype, revision: str):
     from huggingface_hub import hf_hub_download, list_repo_files
     from safetensors.torch import load_file
 
     backbone = cls(hf_config)
     state: dict[str, torch.Tensor] = {}
-    for shard in [f for f in list_repo_files(name) if f.endswith(".safetensors")]:
-        state.update(load_file(hf_hub_download(name, shard)))
+    for shard in [file for file in list_repo_files(name, revision=revision) if file.endswith(".safetensors")]:
+        state.update(load_file(hf_hub_download(name, shard, revision=revision)))
 
     remapped, dropped = {}, []
     for key, value in state.items():
-        target = _wrapper_key_map(key, family)
+        target = _wrapper_key_map(key)
         if target is None:
             dropped.append(key)
         else:
@@ -106,9 +108,9 @@ def _load_wrapper_checkpoint(cls, name: str, family: str, hf_config, dtype):
     return backbone.to(dtype)
 
 
-def _assert_pretrained_weights_loaded(backbone, name: str) -> None:
+def _assert_pretrained_weights_loaded(backbone, name: str, revision: str | None = None) -> None:
     try:
-        ckpt = checkpoint_keys(name)
+        ckpt = checkpoint_keys(name, revision)
     except Exception:  # noqa: BLE001
         return
     if not ckpt:
@@ -125,9 +127,10 @@ def _assert_pretrained_weights_loaded(backbone, name: str) -> None:
     )
 
 
-def load_backbone(cls, name: str, family: str, hf_config, dtype, **extra):
-    if _is_wrapper_checkpoint(name):
-        return _load_wrapper_checkpoint(cls, name, family, hf_config, dtype)
+def load_backbone(cls, name: str, hf_config, dtype, **extra):
+    revision = extra.get("revision")
+    if _is_wrapper_checkpoint(name, revision):
+        return _load_wrapper_checkpoint(cls, name, hf_config, dtype, revision)
 
     attempts = [
         {"dtype": dtype, "attn_implementation": hf_config._attn_implementation},
@@ -139,19 +142,23 @@ def load_backbone(cls, name: str, family: str, hf_config, dtype, **extra):
     for kwargs in attempts:
         try:
             backbone = cls.from_pretrained(name, config=hf_config, **kwargs, **extra)
-            _assert_pretrained_weights_loaded(backbone, name)
+            _assert_pretrained_weights_loaded(backbone, name, revision)
             return backbone
         except TypeError as exc:
             last = exc
     raise RuntimeError(
-        f"could not load {name} under transformers {_transformers_version()}; "
-        f"last error: {last}"
+        f"could not load {name} under transformers {_transformers_version()}; last error: {last}"
     )
 
 
 class WrappedAdapter(ModelAdapter, torch.nn.Module):
     mask_free = False
     final_norm_attr = "norm"
+    capabilities = Capabilities(
+        logits=True,
+        hidden_states=True,
+        attentions=True,
+    )
 
     def __init__(self, ddm, tokenizer, device: str):
         torch.nn.Module.__init__(self)
@@ -195,8 +202,9 @@ class WrappedAdapter(ModelAdapter, torch.nn.Module):
         return None, out.attentions
 
 
-def load_wrapped(family: str, backbone_cls_name: str, model_cfg: dict, adapter_cls):
-    ensure_diffullama_repo()
+def load_diffullama(model_cfg: dict, adapter_cls):
+    code_revision = model_cfg["remote_code_revision"]
+    ensure_diffullama_repo(code_revision)
     from transformers import AutoConfig, AutoTokenizer
 
     checkpoint = model_cfg.get("checkpoint", model_cfg.get("name"))
@@ -204,15 +212,18 @@ def load_wrapped(family: str, backbone_cls_name: str, model_cfg: dict, adapter_c
     device = model_cfg.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
     attn = model_cfg.get("attn_implementation", "eager")
 
-    hf_config = AutoConfig.from_pretrained(checkpoint)
+    revision = model_cfg["revision"]
+    tokenizer_revision = model_cfg["tokenizer_revision"]
+    hf_config = AutoConfig.from_pretrained(checkpoint, revision=revision)
     hf_config._attn_implementation = attn
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint, revision=tokenizer_revision)
 
     import transformers
 
-    backbone_cls = getattr(transformers, backbone_cls_name)
-    extra = {"device_map": "auto"} if family == "diffullama" else {}
-    backbone = load_backbone(backbone_cls, checkpoint, family, hf_config, dtype, **extra)
+    backbone_cls = transformers.LlamaForCausalLM
+    backbone = load_backbone(
+        backbone_cls, checkpoint, hf_config, dtype, revision=revision, device_map="auto"
+    )
 
     try:
         from model import DiscreteDiffusionModel
@@ -223,9 +234,9 @@ def load_wrapped(family: str, backbone_cls_name: str, model_cfg: dict, adapter_c
             f"(underlying error: {exc})"
         ) from exc
 
-    ddm = DiscreteDiffusionModel(
-        model=backbone, config=hf_config, tokenizer=tokenizer, device=device
-    ).to(device)
+    ddm = DiscreteDiffusionModel(model=backbone, config=hf_config, tokenizer=tokenizer, device=device).to(
+        device
+    )
     ddm.eval()
 
     if tokenizer.mask_token_id is None:
@@ -234,6 +245,10 @@ def load_wrapped(family: str, backbone_cls_name: str, model_cfg: dict, adapter_c
     adapter = adapter_cls(ddm, tokenizer, device).eval()
     meta = {
         "checkpoint": checkpoint,
+        "revision": revision,
+        "tokenizer_revision": tokenizer_revision,
+        "remote_code_revision": code_revision,
+        "capabilities": adapter.capabilities.__dict__,
         "n_layers": hf_config.num_hidden_layers,
         "n_heads": hf_config.num_attention_heads,
         "hidden_size": hf_config.hidden_size,

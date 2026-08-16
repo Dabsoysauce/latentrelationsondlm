@@ -1,2 +1,12 @@
-seeds: [1, 2, 3, 4, 5]
-timesteps: [8, 16, 32]
+id: rank_logit_lens
+type: logit_lens
+track: exploratory_extensions
+steps: 64
+normalized_progress: [0.0, 0.25, 0.5, 0.75, 1.0]
+seeds: [42, 43, 44, 45, 46]
+scoring:
+  attender_rows: mean
+  receiver_span: sum
+  top_k: 5
+  primary_relation: object_to_verb
+  primary_visibility: both_masked
