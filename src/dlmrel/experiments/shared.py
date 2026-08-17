@@ -284,6 +284,7 @@ def selection_aware_permutation(
     top_k: int,
     n_permutations: int,
     seed: int,
+    minimum_denominator: int = 1,
 ) -> dict[str, Any]:
     """Repeat select-top-K and dev-choice under permuted receiver labels."""
     select = select_rows[select_rows["relation"] == relation].copy()
@@ -291,33 +292,64 @@ def selection_aware_permutation(
     if select.empty or dev.empty:
         return {"p_value": float("nan"), "n_permutations": 0, "reason": "no_rows"}
     head_keys = ["layer", "head"]
-    observed_top = aggregate_head_scores(select).sort_values(
+    observed_top = aggregate_head_scores(select)
+    observed_top = observed_top[observed_top["n_total"] >= minimum_denominator].sort_values(
         ["accuracy", "n_total", "layer", "head"], ascending=[False, False, True, True]
     ).head(top_k)
+    if observed_top.empty:
+        return {
+            "p_value": float("nan"),
+            "n_permutations": 0,
+            "reason": "no_select_head_meets_minimum_denominator",
+        }
     observed_dev = aggregate_head_scores(dev).merge(observed_top[head_keys], on=head_keys, how="inner")
+    observed_dev = observed_dev[observed_dev["n_total"] >= minimum_denominator]
+    if observed_dev.empty:
+        return {
+            "p_value": float("nan"),
+            "n_permutations": 0,
+            "reason": "no_dev_candidate_meets_minimum_denominator",
+        }
     observed = float(observed_dev["accuracy"].max())
     rng = np.random.default_rng(seed)
+    select_arrays = _permutation_arrays(select)
+    dev_arrays = _permutation_arrays(dev)
+    dev_head_lookup = {head: index for index, head in enumerate(dev_arrays["heads"])}
     null_scores = []
     for _ in range(n_permutations):
-        permuted = []
-        for original in (select, dev):
-            frame = original.copy()
-            instances = frame[["sentence_id", "instance_id", "gold_receiver_word_idx"]].drop_duplicates()
-            shuffled = instances["gold_receiver_word_idx"].to_numpy().copy()
-            rng.shuffle(shuffled)
-            instances["permuted_receiver"] = shuffled
-            frame = frame.drop(columns=["correct"]).merge(
-                instances[["sentence_id", "instance_id", "permuted_receiver"]],
-                on=["sentence_id", "instance_id"],
-                how="left",
-            )
-            frame["correct"] = (frame["predicted_word_idx"] == frame["permuted_receiver"]).astype(int)
-            permuted.append(frame)
-        top = aggregate_head_scores(permuted[0]).sort_values(
-            ["accuracy", "n_total", "layer", "head"], ascending=[False, False, True, True]
-        ).head(top_k)
-        scores = aggregate_head_scores(permuted[1]).merge(top[head_keys], on=head_keys, how="inner")
-        null_scores.append(float(scores["accuracy"].max()))
+        select_accuracy = _permuted_accuracies(select_arrays, rng)
+        dev_accuracy = _permuted_accuracies(dev_arrays, rng)
+        eligible_select = [
+            index
+            for index, denominator in enumerate(select_arrays["denominators"])
+            if denominator >= minimum_denominator
+        ]
+        ranked_select = sorted(
+            eligible_select,
+            key=lambda index: (
+                -select_accuracy[index],
+                -select_arrays["denominators"][index],
+                *select_arrays["heads"][index],
+            ),
+        )[:top_k]
+        dev_candidates = [
+            dev_head_lookup[select_arrays["heads"][index]]
+            for index in ranked_select
+            if select_arrays["heads"][index] in dev_head_lookup
+            and dev_arrays["denominators"][dev_head_lookup[select_arrays["heads"][index]]]
+            >= minimum_denominator
+        ]
+        if not dev_candidates:
+            raise ArtifactError("permutation lost every denominator-eligible dev candidate")
+        winner = min(
+            dev_candidates,
+            key=lambda index: (
+                -dev_accuracy[index],
+                -dev_arrays["denominators"][index],
+                *dev_arrays["heads"][index],
+            ),
+        )
+        null_scores.append(float(dev_accuracy[winner]))
     return {
         "observed_dev_accuracy": observed,
         "p_value": (1 + sum(value >= observed for value in null_scores)) / (n_permutations + 1),
@@ -325,6 +357,47 @@ def selection_aware_permutation(
         "null_mean": float(np.mean(null_scores)),
         "null_std": float(np.std(null_scores)),
     }
+
+
+def _permutation_arrays(frame: pd.DataFrame) -> dict[str, Any]:
+    """Encode one role once so each null draw uses only NumPy operations."""
+    instance_keys = ["sentence_id", "instance_id"]
+    instances = frame[[*instance_keys, "gold_receiver_word_idx"]].drop_duplicates()
+    if instances.duplicated(instance_keys).any():
+        raise ArtifactError("one relation instance has inconsistent gold receivers")
+    instance_index = pd.MultiIndex.from_frame(instances[instance_keys])
+    row_instances = instance_index.get_indexer(pd.MultiIndex.from_frame(frame[instance_keys]))
+    if (row_instances < 0).any():
+        raise ArtifactError("could not index relation instances for permutation")
+    heads = sorted(
+        (int(layer), int(head))
+        for layer, head in frame[["layer", "head"]].drop_duplicates().itertuples(index=False)
+    )
+    head_index = pd.MultiIndex.from_tuples(heads, names=["layer", "head"])
+    row_heads = head_index.get_indexer(pd.MultiIndex.from_frame(frame[["layer", "head"]]))
+    return {
+        "heads": heads,
+        "row_instances": row_instances,
+        "row_heads": row_heads,
+        "predictions": frame["predicted_word_idx"].to_numpy(),
+        "gold": instances["gold_receiver_word_idx"].to_numpy(),
+        "denominators": np.bincount(row_heads, minlength=len(heads)),
+    }
+
+
+def _permuted_accuracies(arrays: dict[str, Any], rng) -> np.ndarray:
+    labels = arrays["gold"].copy()
+    rng.shuffle(labels)
+    correct = arrays["predictions"] == labels[arrays["row_instances"]]
+    counts = np.bincount(
+        arrays["row_heads"], weights=correct.astype(np.int64), minlength=len(arrays["heads"])
+    )
+    return np.divide(
+        counts,
+        arrays["denominators"],
+        out=np.zeros_like(counts, dtype=float),
+        where=arrays["denominators"] > 0,
+    )
 
 
 def structural_slices(rows: pd.DataFrame) -> pd.DataFrame:

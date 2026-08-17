@@ -23,12 +23,13 @@ py -3.11 -m venv .venv
 Dream and DiffuLLaMA require separate GPU environments because they use
 different pinned Transformers versions. See [RUNNING.md](docs/RUNNING.md).
 
-## Five commands
+## Commands
 
 ```powershell
 dlmrel prepare --dataset configs/datasets/ewt.yaml
 dlmrel smoke-test --model configs/models/dream_7b.yaml
 dlmrel run --model configs/models/dream_7b.yaml --dataset configs/datasets/ewt.yaml --experiment configs/experiments/head_search.yaml --run-id dream-ewt-v1
+dlmrel derive-relation-locks --source-run <completed-head-search-run> --output <new-derived-directory>
 dlmrel validate --run-dir results/confirmatory_ewt/dream_7b/ewt/confirmatory_head_search/dream-ewt-v1
 dlmrel compare --runs <dream-run> <diffullama-run> --output results/comparison.csv
 ```
@@ -36,6 +37,13 @@ dlmrel compare --runs <dream-run> <diffullama-run> --output results/comparison.c
 Every real run records its exact model and dataset revisions, configuration,
 command, environment, manifests, exclusions, raw rows, seed summaries, and
 validation result. Completed runs cannot be silently overwritten.
+
+Head search creates independent select/dev locks for the six canonical
+relations. Only `object_to_verb` is the primary confirmatory relation and only
+that locked head is exposed to EWT test. The other five locks are predefined
+secondary selections, not test results. A completed legacy all-head run can be
+converted with `derive-relation-locks`; that command performs no model
+inference and does not read or modify locked-test artifacts.
 
 ## Repository map
 

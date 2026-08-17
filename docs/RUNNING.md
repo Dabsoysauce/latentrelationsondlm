@@ -37,6 +37,25 @@ complete atomic whole-seed checkpoints; incomplete temporary files are
 ignored. A scientific change to the model, data manifests, experiment,
 three-seed list, progress points, scoring, or source selection lock is rejected
 rather than resumed.
+
+### Derive the six locks from the existing Dream run
+
+If `dream-english-head-3seed-v1` already finished its all-head select/dev
+scoring, do not rerun the model. In Colab, with the same Python `RESULTS`
+variable used for the run, execute:
+
+```bash
+!dlmrel derive-relation-locks \
+  --source-run "{RESULTS}/confirmatory_ewt/dream_7b/ewt/confirmatory_head_search/dream-english-head-3seed-v1" \
+  --output "{RESULTS}/derived/dream-english-head-3seed-v1-relation-selection"
+```
+
+The output must be a new directory outside the completed source run. The
+command is CPU-only: it loads no model, performs no inference or rescoring,
+and reads only the saved select/dev evidence plus configuration, manifests,
+and provenance. It never reads `instances.parquet`, test metrics, or the
+source summary, and it never modifies the source run.
+
 After head search completes, copy the path to its `selection_lock.json`. Use
 that lock for the EWT time curve and for German/Japanese transfer:
 

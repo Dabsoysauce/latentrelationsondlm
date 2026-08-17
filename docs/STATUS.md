@@ -8,6 +8,10 @@
   common-instance cross-model comparison.
 - Locked head search and transfer, time curves, attention entropy, logit lens,
   masked POS probing, controls, clustered uncertainty, resume, and validation.
+- Independent select-top-five/dev-choice locks for all six canonical
+  relations, with enforced denominators, per-seed evidence, selection-aware
+  permutation tests, Holm correction for the five predefined secondaries, and
+  a CPU-only derivation command for completed all-head runs.
 
 CPU tests verify the protocol plumbing. Real-model GPU smoke tests and full
 experiments have not yet been run in this implementation; “implemented” does
