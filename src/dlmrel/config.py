@@ -195,6 +195,13 @@ class RunConfig:
         cfg.validate()
         return cfg
 
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> RunConfig:
+        """Load a resolved configuration with the same strict schema checks."""
+        cfg = _strict_dataclass(cls, raw, "config")
+        cfg.validate()
+        return cfg
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 

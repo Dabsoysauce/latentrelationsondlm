@@ -7,8 +7,11 @@ Japanese GSD are locked multilingual transfers. The research models are
 Dream-7B and DiffuLLaMA-7B; the fake model exists only for CPU tests.
 
 The primary analysis is object-to-verb receiver prediction while both words
-are masked. Secondary analyses are the locked-head time curve, attention
-entropy, logit lens, and masked POS probe. DLA, head ablation, native-generation
+are masked. Five predefined relation-selection secondaries are
+subject-to-verb, object-adjective-to-noun, subject-adjective-to-noun,
+object-determiner-to-noun, and subject-determiner-to-noun. Other secondary
+analyses are the locked-head time curve, attention entropy, logit lens, and
+masked POS probe. DLA, head ablation, native-generation
 timing, GPT-2, LLaDA, DiffuGPT, and the extra English treebanks are deferred and
 are not represented as supported results.
 
@@ -28,10 +31,20 @@ Attention rows are averaged over query subtokens and receiver mass is summed
 over receiver subtokens. Special tokens, self positions, and invalid alignments
 cannot become receiver candidates.
 
-All heads are ranked on EWT selection data. Only the top five enter development
-evaluation; development accuracy, denominator, layer, then head provide the
-fixed tie-break. The resulting lock stores model, configuration, manifest, and
-candidate hashes. Test and transfer code load only the locked layer and head.
+Head selection is performed independently for each of the six canonical
+relations. A head must have at least 25 relation rows to be eligible. Within a
+relation, select ranking is accuracy descending, denominator descending, layer
+ascending, then head ascending. Only the top five eligible select heads enter
+development evaluation, where the same ordering chooses the lock; a dev head
+outside that gate cannot win. Insufficient relations receive a documented
+status and no forced lock. Three-seed evidence and select/dev rank stability
+remain in each relation's candidate tables and lock.
+
+Only the primary `object_to_verb` lock is exposed to EWT test or the existing
+time-curve and transfer paths. Test outcomes cannot affect any relation lock.
+Selection-aware permutation p-values are computed per relation; the primary is
+reported separately and Holm correction covers the fixed family of five
+secondaries.
 
 ## Controls and uncertainty
 
@@ -57,7 +70,12 @@ manifests, stage, seed, time point, head selection, and sentence range match.
 
 ## Outputs and claims
 
-Each run contains `config.resolved.yaml`, `command.txt`, `environment.json`,
+Each head-search run contains an immutable `relation-selection/` bundle with
+six relation records, per-relation candidate tables, successful locks,
+permutation results, source hashes, copied config, metadata, summary, and
+validation. Its primary alias is byte-equivalent to the legacy
+`selection_lock.json`, so downstream code remains compatible. Each run also
+contains `config.resolved.yaml`, `command.txt`, `environment.json`,
 `manifest_refs.json`, `selection_lock.json` when applicable,
 `instances.parquet`, `exclusions.parquet`, `per_seed_metrics.csv`,
 `metrics.csv`, `summary.json`, `validation.json`, and resumable checkpoints.

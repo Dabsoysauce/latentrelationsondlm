@@ -1,4 +1,4 @@
-"""Five commands: prepare, smoke-test, run, validate, and compare."""
+"""Command-line entry points for the rigorous DLM relation pipeline."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from .data import load_audit, manifest_root, prepare_manifests
 from .evaluation.compare_models import compare_runs
 from .fake_run import run_fake
 from .pipeline import load_adapter, model_smoke_report, run_real
+from .relation_selection import derive_relation_selection_bundle
 
 
 def read_yaml(path: str | Path) -> dict:
@@ -154,6 +155,25 @@ def cmd_compare(args) -> None:
     print(f"wrote {output} and {common}")
 
 
+def cmd_derive_relation_locks(args) -> None:
+    build = derive_relation_selection_bundle(args.source_run, args.output)
+    statuses = {
+        relation: record["status"] for relation, record in build.bundle["relations"].items()
+    }
+    print(
+        json.dumps(
+            {
+                "output": str(build.output_dir),
+                "source_run": str(Path(args.source_run).resolve()),
+                "relation_statuses": statuses,
+                "model_inference_performed": False,
+                "test_artifacts_read": False,
+            },
+            indent=2,
+        )
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dlmrel", description="Rigorous DLM relation analysis")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -190,6 +210,14 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--runs", nargs="+", required=True)
     compare.add_argument("--output", required=True)
     compare.set_defaults(func=cmd_compare)
+
+    derive = commands.add_parser(
+        "derive-relation-locks",
+        help="derive six relation locks from a completed head-search run without inference",
+    )
+    derive.add_argument("--source-run", required=True)
+    derive.add_argument("--output", required=True)
+    derive.set_defaults(func=cmd_derive_relation_locks)
     return parser
 
 

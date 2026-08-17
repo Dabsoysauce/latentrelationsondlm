@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -13,21 +12,16 @@ from ..artifacts import (
     ArtifactError,
     SelectionLock,
     atomic_json,
-    canonical_hash,
-    scientific_configuration,
     selection_lock_hash,
 )
 from ..config import RunConfig
-from ..controls import fit_fixed_offset
 from ..data import load_manifest_examples
-from ..selection import create_selection_lock, write_lock_bundle
+from ..relation_selection import derive_relation_selection_bundle, install_primary_aliases
 from .shared import (
     aggregate_head_scores,
     locked_metrics,
     per_seed_metrics,
     score_over_seeds,
-    selection_aware_permutation,
-    selection_progress,
     structural_slices,
     write_frames,
 )
@@ -71,41 +65,22 @@ def run_head_search(
     )
     select_scores = aggregate_head_scores(select_rows)
     dev_scores = aggregate_head_scores(dev_rows)
-    relation = cfg.experiment.scoring.primary_relation
-    offsets = [
-        instance.word_distance
-        for example in select_examples
-        for instance in example.relations
-        if instance.relation == relation
-    ]
-    fixed_offset = fit_fixed_offset(offsets)
-    run_metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
-    lock, select_candidates, dev_candidates = create_selection_lock(
-        select_scores,
-        dev_scores,
-        relation=relation,
-        top_k=cfg.experiment.scoring.top_k,
-        track=cfg.track,
-        model_id=cfg.model.id,
-        model_revision=cfg.model.revision,
-        dataset_id=cfg.dataset.id,
-        config_hash=canonical_hash(scientific_configuration(cfg.to_dict())),
-        select_manifest_hash=manifest_hashes["select"],
-        dev_manifest_hash=manifest_hashes["dev"],
-        frozen_settings={
-            "fixed_offset": fixed_offset,
-            "row_aggregation": cfg.experiment.scoring.attender_rows,
-            "span_aggregation": cfg.experiment.scoring.receiver_span,
-            "selection_progress": selection_progress(cfg),
-            "minimum_denominator": 25,
-        },
-        created_at=run_metadata["started_at"],
-    )
-    write_lock_bundle(run_dir, lock, select_candidates, dev_candidates)
     select_scores.to_csv(run_dir / "select_all_head_scores.csv", index=False)
     dev_scores.to_csv(run_dir / "dev_all_head_scores.csv", index=False)
     select_rows.to_parquet(run_dir / "select_instances.parquet", index=False)
     dev_rows.to_parquet(run_dir / "dev_instances.parquet", index=False)
+    relation_bundle = derive_relation_selection_bundle(
+        run_dir,
+        run_dir / "relation-selection",
+        require_complete=False,
+        allow_source_output=True,
+        allow_existing=True,
+    )
+    install_primary_aliases(run_dir, relation_bundle)
+    lock = relation_bundle.primary_lock
+    if lock is None:
+        raise ArtifactError("primary object_to_verb relation has insufficient selection evidence")
+    fixed_offset = lock.frozen_settings.get("fixed_offset")
 
     test_rows = score_over_seeds(
         model,
@@ -122,14 +97,18 @@ def run_head_search(
     exclusions = pd.concat([select_exclusions, dev_exclusions, test_exclusions], ignore_index=True)
     write_frames(run_dir, raw=test_rows, exclusions=exclusions)
     metrics = locked_metrics(test_rows, fixed_offset)
-    permutation = selection_aware_permutation(
-        select_rows,
-        dev_rows,
-        relation=relation,
-        top_k=cfg.experiment.scoring.top_k,
-        n_permutations=1000,
-        seed=42,
-    )
+    permutation_table = pd.read_csv(relation_bundle.output_dir / "permutation_results.csv")
+    primary_permutation = permutation_table[
+        permutation_table["relation"] == cfg.experiment.scoring.primary_relation
+    ].iloc[0]
+    permutation = {
+        "observed_dev_accuracy": float(primary_permutation["observed_dev_accuracy"]),
+        "p_value": float(primary_permutation["raw_p_value"]),
+        "n_permutations": int(primary_permutation["n_permutations"]),
+        "null_mean": float(primary_permutation["null_mean"]),
+        "null_std": float(primary_permutation["null_std"]),
+        "family": "primary_separate",
+    }
     metrics["selection_permutation_p"] = permutation["p_value"]
     metrics.to_csv(run_dir / "metrics.csv", index=False)
     per_seed_metrics(test_rows).to_csv(run_dir / "per_seed_metrics.csv", index=False)
@@ -142,6 +121,8 @@ def run_head_search(
         "n_test_sentences": len(test_examples),
         "n_test_instances": int(test_rows["instance_id"].nunique()),
         "test_heads_exposed": 1,
+        "relation_selection_bundle": "relation-selection/relation_selection_bundle.json",
+        "secondary_relations": "predefined_selected_not_tested",
     }
 
 

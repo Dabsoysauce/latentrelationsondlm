@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from dlmrel.experiments.shared import selection_aware_permutation
 
@@ -42,4 +43,7 @@ def test_selection_aware_permutation_is_deterministic():
         seed=42,
     )
     assert first == second
-    assert 0 < first["p_value"] <= 1
+    assert first["observed_dev_accuracy"] == 1.0
+    assert first["p_value"] == pytest.approx(1 / 31)
+    assert first["null_mean"] == pytest.approx(0.3777777777777779)
+    assert first["null_std"] == pytest.approx(0.07973722274670737)
