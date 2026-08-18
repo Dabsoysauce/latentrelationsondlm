@@ -108,8 +108,11 @@ def model_smoke_report(model, tokenizer, cfg: RunConfig, metadata: dict[str, Any
     second = model.forward_attentions(input_ids, output_hidden_states=True)
     logits, attentions, hidden = first
     second_logits, second_attentions, second_hidden = second
-    logits = model.get_logits(hidden[-1]) if logits is None else logits
-    second_logits = model.get_logits(second_hidden[-1]) if second_logits is None else second_logits
+    with torch.no_grad():
+        logits = model.get_logits(hidden[-1]) if logits is None else logits
+        second_logits = (
+            model.get_logits(second_hidden[-1]) if second_logits is None else second_logits
+        )
     row_error = max(float((layer.float().sum(dim=-1) - 1).abs().max()) for layer in attentions)
     determinism = max(
         [float((logits.float() - second_logits.float()).abs().max())]
@@ -118,10 +121,23 @@ def model_smoke_report(model, tokenizer, cfg: RunConfig, metadata: dict[str, Any
             for left, right in zip(attentions, second_attentions, strict=True)
         ]
     )
-    if row_error > 1e-3:
-        raise ArtifactError("attention rows do not sum to one")
+    # Attention weights are stored in the model's dtype, so each probability is
+    # already rounded before the fp32 sum above ever runs. bfloat16 carries eight
+    # mantissa bits, which bounds the error on a row summing to one at eps/2 =
+    # 3.9e-3 -- four times the fixed 1e-3 this used to demand, so a correct
+    # bfloat16 model could not pass. Scale with the dtype and keep the tight
+    # bound for float32.
+    row_tolerance = max(1e-3, float(torch.finfo(attentions[0].dtype).eps))
+    if row_error > row_tolerance:
+        raise ArtifactError(
+            f"attention rows do not sum to one: max |row sum - 1| = {row_error:.3e} "
+            f"exceeds {row_tolerance:.3e} for {attentions[0].dtype}"
+        )
     if determinism > 1e-5:
-        raise ArtifactError("model is nondeterministic in evaluation mode")
+        raise ArtifactError(
+            f"model is nondeterministic in evaluation mode: max abs difference "
+            f"between two identical forward passes = {determinism:.3e}"
+        )
     return {
         "status": "passed",
         "model": cfg.model.id,
@@ -135,6 +151,8 @@ def model_smoke_report(model, tokenizer, cfg: RunConfig, metadata: dict[str, Any
         "hidden_state_shapes": [list(value.shape) for value in hidden],
         "attention_shapes": [list(value.shape) for value in attentions],
         "attention_row_sum_max_error": row_error,
+        "attention_row_sum_tolerance": row_tolerance,
+        "attention_dtype": str(attentions[0].dtype),
         "determinism_max_abs_error": determinism,
         "final_depth_logit_lens_max_abs_error": float(
             (logits.float() - model.get_lm_head()(hidden[-1]).float()).abs().max()
