@@ -1,114 +1,196 @@
-"""Small deterministic run used to test artifact plumbing without a GPU."""
+"""Deterministic CPU end-to-end run for artifact and protocol verification."""
 
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
-import torch
 
-from .artifacts import (
-    ArtifactError,
-    SelectionLock,
-    atomic_json,
-    canonical_hash,
-    scientific_configuration,
-    write_shard,
-)
-from .config import RunConfig
+from .artifacts import ArtifactError, atomic_json
+from .config import RELATION_NAMES, RunConfig
+from .experiments.shared import aggregate_head_scores, write_frames
 from .models.fake import FakeAdapter
-from .selection import create_selection_lock, write_lock_bundle
+from .permutation import selection_aware_permutation
+from .relation_selection import (
+    MINIMUM_DENOMINATOR,
+    PRIMARY_RELATION,
+    RelationLockSet,
+    derive_relation_selection_bundle,
+    filter_relation_locked_rows,
+    install_primary_aliases,
+    load_relation_locks,
+    write_resolved_lock_manifest,
+)
+
+FAKE_PERMUTATIONS = 10
+FAKE_HEADS = tuple((layer, head) for layer in range(2) for head in range(3))
 
 
 def run_fake(cfg: RunConfig, run_dir: Path) -> None:
-    adapter = FakeAdapter()
-    rows = []
-    for seed in cfg.experiment.seeds:
-        output = adapter.forward(torch.tensor([[1, 3, 5, 7, 9]]), timestep=seed % cfg.experiment.steps)
-        for layer, attention in enumerate(output.attentions or ()):
-            for head in range(attention.shape[1]):
-                prediction = int(attention[0, head, 3].argmax())
-                rows.append(
-                    {
-                        "sentence_id": "synthetic:0",
-                        "instance_id": f"synthetic:{seed}",
-                        "treebank": cfg.dataset.treebank,
-                        "relation": "object_to_verb",
-                        "seed": seed,
-                        "timestep": seed % cfg.experiment.steps,
-                        "normalized_progress": (seed % cfg.experiment.steps)
-                        / max(cfg.experiment.steps - 1, 1),
-                        "visibility": "both_visible",
-                        "layer": layer,
-                        "head": head,
-                        "prediction": prediction,
-                        "correct": int(prediction == 1),
-                    }
-                )
-    scores = pd.DataFrame(rows).groupby(["relation", "layer", "head"], as_index=False).agg(
-        accuracy=("correct", "mean"), n_total=("correct", "size")
-    )
-    lock = _selection_lock(cfg, run_dir, scores)
-    selected = [
-        row
-        for row in rows
-        if row["relation"] == lock.relation and row["layer"] == lock.layer and row["head"] == lock.head
-    ]
-    write_shard(run_dir, 0, selected)
-    frame = pd.DataFrame(selected)
-    frame.to_parquet(run_dir / "instances.parquet", index=False)
-    pd.DataFrame(columns=["sentence_id", "instance_id", "role", "reason"]).to_parquet(
-        run_dir / "exclusions.parquet", index=False
-    )
-    per_seed = frame.groupby(["seed", "relation", "layer", "head"], as_index=False)["correct"].mean()
+    """Exercise six locks, serialization, permutation checkpoints, and finalization on CPU."""
+    if cfg.track == "external_treebank_transfer":
+        if not cfg.runtime.selection_lock:
+            raise ArtifactError("external transfer requires an EWT relation-lock source")
+        locks = load_relation_locks(cfg.runtime.selection_lock, cfg)
+        test_all = _all_head_rows(cfg, "test")
+    else:
+        select_rows = _all_head_rows(cfg, "select")
+        dev_rows = _all_head_rows(cfg, "dev")
+        aggregate_head_scores(select_rows).to_csv(
+            run_dir / "select_all_head_scores.csv", index=False
+        )
+        aggregate_head_scores(dev_rows).to_csv(
+            run_dir / "dev_all_head_scores.csv", index=False
+        )
+        select_rows.to_parquet(run_dir / "select_instances.parquet", index=False)
+        dev_rows.to_parquet(run_dir / "dev_instances.parquet", index=False)
+        bundle = derive_relation_selection_bundle(
+            run_dir,
+            run_dir / "relation-selection",
+            require_complete=False,
+            allow_source_output=True,
+            allow_existing=True,
+        )
+        install_primary_aliases(run_dir, bundle)
+        locks = load_relation_locks(bundle.output_dir, cfg)
+        test_all = _all_head_rows(cfg, "test")
+        _write_fake_permutations(run_dir, cfg, select_rows, dev_rows, test_all, locks)
+
+    selected = filter_relation_locked_rows(test_all, locks)
+    write_resolved_lock_manifest(run_dir, locks)
+    write_frames(run_dir, raw=selected, exclusions=pd.DataFrame())
+    per_seed = selected.groupby(
+        ["seed", "treebank", "relation", "layer", "head"], as_index=False
+    ).agg(accuracy=("correct", "mean"), n_instances=("correct", "size"))
     per_seed.to_csv(run_dir / "per_seed_metrics.csv", index=False)
-    per_seed.groupby(["relation", "layer", "head"], as_index=False).agg(
-        accuracy=("correct", "mean"), seed_std=("correct", "std"), n_seeds=("seed", "nunique")
+    per_seed.groupby(["treebank", "relation", "layer", "head"], as_index=False).agg(
+        accuracy=("accuracy", "mean"),
+        seed_std=("accuracy", "std"),
+        n_seeds=("seed", "nunique"),
     ).to_csv(run_dir / "metrics.csv", index=False)
     atomic_json(
         run_dir / "summary.json",
         {
             "schema_version": "dlmrel-run-v1",
             "completion_status": "complete",
-            "n_instances": len(frame),
-            "capabilities": adapter.capabilities.__dict__,
+            "n_instances": int(selected["instance_id"].nunique()),
+            "relations": sorted(selected["relation"].unique()),
+            "relation_locks_applied": len(locks.locks),
+            "capabilities": asdict(FakeAdapter.capabilities),
+            "fake_cpu_only": True,
         },
     )
-    metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
-    metadata.update({"completion_status": "complete", "ended_at": datetime.now(timezone.utc).isoformat()})
-    atomic_json(run_dir / "run_metadata.json", metadata)
-
-
-def _selection_lock(cfg: RunConfig, run_dir: Path, scores: pd.DataFrame) -> SelectionLock:
-    manifests = json.loads((run_dir / "manifest_refs.json").read_text(encoding="utf-8"))
-    if cfg.track == "external_treebank_transfer":
-        if not cfg.runtime.selection_lock:
-            raise ArtifactError("external transfer requires an EWT selection lock")
-        lock = SelectionLock(**json.loads(Path(cfg.runtime.selection_lock).read_text(encoding="utf-8")))
-        if lock.dataset_id != "ewt" or lock.model_id != cfg.model.id:
-            raise ArtifactError("external transfer lock must be EWT and use the same model")
-        lock.write_once(run_dir / "selection_lock.json")
-        return lock
-
-    dev = scores.copy()
-    dev["accuracy"] = dev["accuracy"] + (dev["head"] == 1) * 0.01
-    lock, candidates, dev_candidates = create_selection_lock(
-        scores,
-        dev,
-        relation=cfg.experiment.scoring.primary_relation,
-        top_k=cfg.experiment.scoring.top_k,
-        track=cfg.track,
-        model_id=cfg.model.id,
-        model_revision=cfg.model.revision,
-        dataset_id=cfg.dataset.id,
-        config_hash=canonical_hash(scientific_configuration(cfg.to_dict())),
-        select_manifest_hash=manifests["select"],
-        dev_manifest_hash=manifests["dev"],
-        created_at=json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))[
-            "started_at"
-        ],
+    metadata_path = run_dir / "run_metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.update(
+        {
+            "completion_status": "complete",
+            "ended_at": datetime.now(timezone.utc).isoformat(),
+            "model_revision": cfg.model.revision,
+            "tokenizer_revision": cfg.model.tokenizer_revision,
+            "remote_code_revision": cfg.model.remote_code_revision,
+        }
     )
-    write_lock_bundle(run_dir, lock, candidates, dev_candidates)
-    return lock
+    atomic_json(metadata_path, metadata)
+
+
+def _all_head_rows(cfg: RunConfig, role: str) -> pd.DataFrame:
+    rows = []
+    progress = 0.0
+    timestep = 0
+    for relation_index, relation in enumerate(RELATION_NAMES):
+        for instance_index in range(10):
+            gold = 1 + instance_index % 3
+            for seed_index, seed in enumerate(cfg.experiment.seeds):
+                observation = seed_index * 10 + instance_index
+                for head_index, (layer, head) in enumerate(FAKE_HEADS):
+                    if role == "select":
+                        correct_limit = 30 - head_index
+                    elif role == "dev":
+                        correct_limit = 30 if head_index == (relation_index + 1) % 5 else 20 - head_index
+                    else:
+                        correct_limit = 30 if head_index == (relation_index + 2) % 6 else 12
+                    correct = int(observation < max(correct_limit, 0))
+                    rows.append(
+                        {
+                            "sentence_id": f"{role}-{relation}-{instance_index}",
+                            "instance_id": f"{role}-{relation}-{instance_index}:0",
+                            "sentence": "alpha beta gamma delta",
+                            "treebank": cfg.dataset.treebank,
+                            "language": cfg.dataset.language,
+                            "original_split": {"select": "train", "dev": "dev", "test": "test"}[
+                                role
+                            ],
+                            "role": role,
+                            "relation": relation,
+                            "seed": seed,
+                            "timestep": timestep,
+                            "normalized_progress": progress,
+                            "visibility": "both_masked",
+                            "layer": layer,
+                            "head": head,
+                            "attender_word_idx": 0,
+                            "gold_receiver_word_idx": gold,
+                            "receiver_word_idx": gold,
+                            "predicted_word_idx": gold if correct else ((gold % 3) + 1),
+                            "correct": correct,
+                            "attender_span": [1],
+                            "receiver_span": [gold + 1],
+                            "signed_distance": relation_index + 1,
+                            "sentence_length_words": 4,
+                            "n_candidate_words": 3,
+                        }
+                    )
+    return pd.DataFrame(rows)
+
+
+def _write_fake_permutations(
+    run_dir: Path,
+    cfg: RunConfig,
+    select_rows: pd.DataFrame,
+    dev_rows: pd.DataFrame,
+    test_rows: pd.DataFrame,
+    locks: RelationLockSet,
+) -> None:
+    metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+    results = []
+    for relation in RELATION_NAMES:
+        result = selection_aware_permutation(
+            select_rows,
+            dev_rows,
+            test_rows,
+            relation=relation,
+            top_k=cfg.experiment.scoring.top_k,
+            n_permutations=FAKE_PERMUTATIONS,
+            seed=42,
+            scientific_config_hash=metadata["scientific_config_hash"],
+            minimum_denominator=MINIMUM_DENOMINATOR,
+            checkpoint_path=run_dir / "permutation-checkpoints" / f"{relation}.json",
+            resume=cfg.runtime.resume,
+            progress_interval=0,
+            checkpoint_interval=5,
+        )
+        lock = locks.resolve(relation)
+        if (result["observed_selected_layer"], result["observed_selected_head"]) != (
+            lock.layer,
+            lock.head,
+        ):
+            raise ArtifactError(
+                f"fake permutation protocol disagrees with lock for {relation!r}"
+            )
+        atomic_json(run_dir / "permutations" / f"{relation}.json", result)
+        results.append(
+            {
+                "relation": relation,
+                "observed_test_accuracy": result["observed_test_accuracy"],
+                "p_value": result["p_value"],
+                "n_permutations": result["n_permutations"],
+                "null_definition": result["null_definition"],
+            }
+        )
+        if relation == PRIMARY_RELATION:
+            atomic_json(run_dir / "selection_permutation.json", result)
+    pd.DataFrame(results).to_csv(run_dir / "selection_permutation_results.csv", index=False)

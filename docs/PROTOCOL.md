@@ -19,7 +19,8 @@ are not represented as supported results.
 
 Each dataset YAML pins the UD repository commit and the SHA-256 of train, dev,
 and test files. EWT train supplies selection sentences, EWT dev chooses among
-the select-set top five heads, and EWT test evaluates the one locked head.
+each relation's select-set top five heads, and EWT test evaluates every
+relation at its own locked head.
 German and Japanese keep their official boundaries and receive the exact EWT
 lock without reselection. Normalized duplicate text is removed across roles,
 and tokenizer failures are recorded rather than replaced.
@@ -40,11 +41,24 @@ outside that gate cannot win. Insufficient relations receive a documented
 status and no forced lock. Three-seed evidence and select/dev rank stability
 remain in each relation's candidate tables and lock.
 
-Only the primary `object_to_verb` lock is exposed to EWT test or the existing
-time-curve and transfer paths. Test outcomes cannot affect any relation lock.
-Selection-aware permutation p-values are computed per relation; the primary is
-reported separately and Holm correction covers the fixed family of five
-secondaries.
+Each relation is evaluated only at its matching relation-specific lock. New EWT
+test, time-curve, and transfer runs score the union of the six locked heads and
+then retain each relation only at its own head; they never broadcast the object
+head to the other relations. The legacy `selection_lock.json` remains an
+unambiguous object-only alias. Existing object-head-only test rows remain valid
+only for that object analysis and are not six-relation test results.
+
+Test outcomes cannot affect any relation lock. Selection-aware permutation
+p-values are computed per relation; the primary is reported separately and
+Holm correction covers the fixed family of five secondaries. In each split and
+permutation, every relation instance receives one uniformly sampled receiver
+from its aligned within-sentence word candidates, excluding its attender and
+all non-word special/BOS/padding positions. That label is shared across every
+head and seed for the instance. Each permutation ranks on select, chooses among
+the select top five on dev, and only then evaluates the selected head on test.
+The finite-sample p-value is `(1 + count(null >= observed)) / (B + 1)`, with
+`B=1000` for real runs. Deterministic per-index random streams and atomic
+checkpoints make resumed and uninterrupted null statistics identical.
 
 ## Controls and uncertainty
 
@@ -53,8 +67,9 @@ nearest receiver, previous and next word, oracle receiver POS, wrong same-POS
 word, and a deterministic matched alternative. The primary interval is a
 sentence-clustered bootstrap, so repeated relation and seed rows from one
 sentence are never treated as independent sentences. Seed summaries remain
-separate, selection-aware permutations repeat select-plus-dev selection, and
-Holm correction is the default if a reported family contains multiple tests.
+separate, selection-aware permutations repeat the complete select/dev/test
+protocol without test leakage, and Holm correction is the default if a
+reported family contains multiple tests.
 
 Every active experiment uses exactly three stochastic seeds: `42`, `43`, and
 `44`. The POS probe is fit, tuned on development data, and evaluated
@@ -71,10 +86,12 @@ manifests, stage, seed, time point, head selection, and sentence range match.
 ## Outputs and claims
 
 Each head-search run contains an immutable `relation-selection/` bundle with
-six relation records, per-relation candidate tables, successful locks,
-permutation results, source hashes, copied config, metadata, summary, and
-validation. Its primary alias is byte-equivalent to the legacy
-`selection_lock.json`, so downstream code remains compatible. Each run also
+six relation records, per-relation candidate tables, successful locks, source
+hashes, copied config, metadata, summary, and validation. Lock derivation is
+select/dev-only; permutation results are written later by the head-search run
+after the required all-head test evidence exists. The primary alias is
+byte-equivalent to the legacy `selection_lock.json`, which remains safe for
+object-only compatibility. Each run also
 contains `config.resolved.yaml`, `command.txt`, `environment.json`,
 `manifest_refs.json`, `selection_lock.json` when applicable,
 `instances.parquet`, `exclusions.parquet`, `per_seed_metrics.csv`,
