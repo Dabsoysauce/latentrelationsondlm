@@ -83,7 +83,16 @@ def _load_wrapper_checkpoint(cls, name: str, hf_config, dtype, revision: str):
     from huggingface_hub import hf_hub_download, list_repo_files
     from safetensors.torch import load_file
 
-    backbone = cls(hf_config)
+    # Build the empty backbone directly in the target dtype. Constructing in the
+    # fp32 default and casting afterwards peaks at twice the parameter memory --
+    # ~28GB of host RAM for a 7B before a single weight is read.
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        backbone = cls(hf_config)
+    finally:
+        torch.set_default_dtype(previous)
+
     state: dict[str, torch.Tensor] = {}
     for shard in [file for file in list_repo_files(name, revision=revision) if file.endswith(".safetensors")]:
         state.update(load_file(hf_hub_download(name, shard, revision=revision)))
