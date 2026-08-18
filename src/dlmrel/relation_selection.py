@@ -7,7 +7,7 @@ import json
 import os
 import shutil
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,25 +24,23 @@ from .artifacts import (
     atomic_json,
     canonical_hash,
     scientific_configuration,
+    selection_lock_hash,
 )
 from .config import RELATION_NAMES, RunConfig
 from .controls import fit_fixed_offset
 from .experiments.shared import (
     aggregate_head_scores,
-    selection_aware_permutation,
     selection_progress,
 )
 
-BUNDLE_SCHEMA = "dlmrel-relation-selection-bundle-v1"
-VALIDATION_SCHEMA = "dlmrel-relation-selection-validation-v1"
-PROTOCOL_SCHEMA = "dlmrel-relation-head-selection-v1"
+BUNDLE_SCHEMA = "dlmrel-relation-selection-bundle-v2"
+VALIDATION_SCHEMA = "dlmrel-relation-selection-validation-v2"
+PROTOCOL_SCHEMA = "dlmrel-relation-head-selection-v2"
 PRIMARY_RELATION = "object_to_verb"
 SECONDARY_RELATIONS = tuple(relation for relation in RELATION_NAMES if relation != PRIMARY_RELATION)
 REQUIRED_SEEDS = (42, 43, 44)
 TOP_K = 5
 MINIMUM_DENOMINATOR = 25
-PERMUTATION_SEED = 42
-DEFAULT_PERMUTATIONS = 1000
 
 RAW_REQUIRED_COLUMNS = {
     "sentence_id",
@@ -104,6 +102,170 @@ class BundleBuild:
     primary_dev_candidates: pd.DataFrame
 
 
+@dataclass(frozen=True)
+class RelationLockSet:
+    source: Path
+    source_kind: str
+    locks: dict[str, SelectionLock]
+
+    def resolve(self, relation: str) -> SelectionLock:
+        if relation not in RELATION_NAMES:
+            raise ArtifactError(f"unknown canonical relation: {relation!r}")
+        try:
+            return self.locks[relation]
+        except KeyError as exc:
+            raise ArtifactError(
+                f"selection source {self.source} has no lock for relation {relation!r}"
+            ) from exc
+
+    @property
+    def heads(self) -> set[tuple[int, int]]:
+        return {(lock.layer, lock.head) for lock in self.locks.values()}
+
+
+def load_relation_locks(path: str | Path, cfg: RunConfig | None = None) -> RelationLockSet:
+    """Load a canonical six-lock bundle or an unambiguous legacy object lock."""
+    source = Path(path).resolve()
+    if source.is_dir() and (source / "relation-selection").is_dir():
+        source = source / "relation-selection"
+    if source.is_dir():
+        manifest = source / "relation_selection_bundle.json"
+    elif source.name == "relation_selection_bundle.json":
+        manifest = source
+        source = source.parent
+    else:
+        return _load_legacy_object_lock(source, cfg)
+    if not manifest.is_file():
+        raise ArtifactError(f"missing canonical relation-lock manifest: {manifest}")
+    validation = _read_json(source / "validation.json")
+    bundle = _read_json(manifest)
+    if validation.get("schema_version") != VALIDATION_SCHEMA or not validation.get("valid"):
+        raise ArtifactError("relation-lock bundle is stale, incomplete, or invalid")
+    if bundle.get("schema_version") != BUNDLE_SCHEMA:
+        raise ArtifactError("unsupported or stale relation-lock bundle schema")
+    if set(bundle.get("relations", {})) != set(RELATION_NAMES):
+        raise ArtifactError("relation-lock bundle must contain exactly six canonical relations")
+    source_record = _read_json(source / "source_artifacts.json")
+    source_hash = source_record.get("stable_selection_artifacts_hash")
+    if not isinstance(source_hash, str):
+        raise ArtifactError("relation-lock bundle is missing its source-evidence identity")
+    current_validation = _validate_written_bundle(source, source_hash)
+    if not current_validation["valid"]:
+        raise ArtifactError(
+            "relation-lock bundle fails current validation: "
+            + "; ".join(current_validation["errors"])
+        )
+
+    locks: dict[str, SelectionLock] = {}
+    used_paths: set[Path] = set()
+    for relation in RELATION_NAMES:
+        record = bundle["relations"][relation]
+        if record.get("status") != "selected" or not isinstance(record.get("lock"), str):
+            raise ArtifactError(f"relation-lock bundle has no successful lock for {relation!r}")
+        lock_path = (source / record["lock"]).resolve()
+        if source not in lock_path.parents or lock_path in used_paths:
+            raise ArtifactError("relation-lock manifest contains a duplicate or unsafe lock path")
+        used_paths.add(lock_path)
+        raw = _read_json(lock_path)
+        if set(raw) != set(SelectionLock.__dataclass_fields__):
+            raise ArtifactError(f"lock schema fields do not match for relation {relation!r}")
+        lock = SelectionLock(**raw)
+        if lock.schema_version != LOCK_SCHEMA or lock.relation != relation:
+            raise ArtifactError(f"relation-lock identity mismatch for {relation!r}")
+        if record.get("selection_lock_hash") != selection_lock_hash(lock):
+            raise ArtifactError(f"stale or mismatched lock hash for relation {relation!r}")
+        _validate_lock_for_config(lock, cfg, require_relation_protocol=True)
+        locks[relation] = lock
+    primary_alias = source / "selection_lock.json"
+    primary_path = source / bundle["relations"][PRIMARY_RELATION]["lock"]
+    if not primary_alias.is_file() or primary_alias.read_bytes() != primary_path.read_bytes():
+        raise ArtifactError("primary compatibility alias does not match object_to_verb lock")
+    return RelationLockSet(source=source, source_kind="six_relation_bundle", locks=locks)
+
+
+def filter_relation_locked_rows(rows: pd.DataFrame, locks: RelationLockSet) -> pd.DataFrame:
+    """Keep each relation only at its own selected head; never broadcast one lock."""
+    required = {"relation", "layer", "head"}
+    if missing := required - set(rows):
+        raise ArtifactError(f"locked rows missing columns: {sorted(missing)}")
+    admitted = pd.Series(False, index=rows.index)
+    for relation, lock in locks.locks.items():
+        admitted |= (
+            (rows["relation"] == relation)
+            & (rows["layer"] == lock.layer)
+            & (rows["head"] == lock.head)
+        )
+    return rows.loc[admitted].copy().reset_index(drop=True)
+
+
+def write_resolved_lock_manifest(run_dir: str | Path, locks: RelationLockSet) -> None:
+    """Record downstream relation-to-head resolution and preserve the primary alias."""
+    run = Path(run_dir)
+    primary = locks.resolve(PRIMARY_RELATION)
+    primary.write_once(run / "selection_lock.json")
+    atomic_json(
+        run / "relation_locks.resolved.json",
+        {
+            "schema_version": BUNDLE_SCHEMA,
+            "source": str(locks.source),
+            "source_kind": locks.source_kind,
+            "relations": {
+                relation: {
+                    "layer": lock.layer,
+                    "head": lock.head,
+                    "selection_lock_hash": selection_lock_hash(lock),
+                }
+                for relation, lock in locks.locks.items()
+            },
+        },
+    )
+
+
+def _load_legacy_object_lock(path: Path, cfg: RunConfig | None) -> RelationLockSet:
+    if not path.is_file():
+        raise ArtifactError(f"selection lock path does not exist: {path}")
+    raw = _read_json(path)
+    if set(raw) != set(SelectionLock.__dataclass_fields__):
+        raise ArtifactError("legacy selection lock schema fields do not match")
+    lock = SelectionLock(**raw)
+    if lock.schema_version != LOCK_SCHEMA or lock.relation != PRIMARY_RELATION:
+        raise ArtifactError("legacy compatibility is only valid for object_to_verb")
+    _validate_lock_for_config(lock, cfg, require_relation_protocol=False)
+    return RelationLockSet(path, "legacy_object_only", {PRIMARY_RELATION: lock})
+
+
+def _validate_lock_for_config(
+    lock: SelectionLock,
+    cfg: RunConfig | None,
+    *,
+    require_relation_protocol: bool,
+) -> None:
+    if lock.dataset_id != "ewt":
+        raise ArtifactError("relation locks must originate from EWT")
+    settings = lock.frozen_settings
+    if require_relation_protocol and (
+        settings.get("model_revision") != lock.model_revision
+        or settings.get("seeds") != list(REQUIRED_SEEDS)
+        or settings.get("top_k") != TOP_K
+        or settings.get("minimum_denominator") != MINIMUM_DENOMINATOR
+        or settings.get("test_outcomes_used") is not False
+    ):
+        raise ArtifactError("relation lock contains stale or inconsistent frozen settings")
+    if cfg is not None and (
+        lock.model_id != cfg.model.id
+        or lock.model_revision != cfg.model.revision
+        or (
+            require_relation_protocol
+            and settings.get("tokenizer_revision") != cfg.model.tokenizer_revision
+        )
+        or (
+            require_relation_protocol
+            and settings.get("remote_code_revision") != cfg.model.remote_code_revision
+        )
+    ):
+        raise ArtifactError("relation lock model/tokenizer/revision mismatch")
+
+
 def derive_relation_selection_bundle(
     source_run: str | Path,
     output_dir: str | Path,
@@ -111,7 +273,6 @@ def derive_relation_selection_bundle(
     require_complete: bool = True,
     allow_source_output: bool = False,
     allow_existing: bool = False,
-    n_permutations: int = DEFAULT_PERMUTATIONS,
 ) -> BundleBuild:
     """Derive six independent locks without reading any locked-test artifact."""
     source = Path(source_run).resolve()
@@ -127,7 +288,7 @@ def derive_relation_selection_bundle(
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.tmp-", dir=output.parent))
     try:
-        built = _write_bundle(temporary, evidence, source_hash, n_permutations=n_permutations)
+        built = _write_bundle(temporary, evidence, source_hash)
         os.replace(temporary, output)
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
@@ -158,8 +319,6 @@ def _write_bundle(
     output: Path,
     evidence: SourceEvidence,
     source_hash: str,
-    *,
-    n_permutations: int,
 ) -> BundleBuild:
     (output / "locks").mkdir(parents=True)
     (output / "candidates").mkdir()
@@ -186,12 +345,19 @@ def _write_bundle(
             "lock": None,
         }
         if result["status"] == "selected":
-            lock = _make_lock(evidence, relation, result, candidate_hash)
+            lock = _make_lock(
+                evidence,
+                relation,
+                result,
+                candidate_hash,
+                select_candidates,
+                dev_candidates,
+            )
             lock_path = output / "locks" / f"{relation}.json"
             lock.write_once(lock_path)
             locks[relation] = lock
             record["lock"] = f"locks/{relation}.json"
-            record["selection_lock_hash"] = canonical_hash(asdict(lock))
+            record["selection_lock_hash"] = selection_lock_hash(lock)
         relation_records[relation] = record
 
     primary_lock = locks.get(PRIMARY_RELATION)
@@ -202,12 +368,6 @@ def _write_bundle(
         ).read_bytes():
             raise ArtifactError("bundled primary alias is not byte-equivalent to its relation lock")
 
-    permutation_rows = _permutation_results(
-        evidence,
-        relation_records,
-        n_permutations=n_permutations,
-    )
-    pd.DataFrame(permutation_rows).to_csv(output / "permutation_results.csv", index=False)
     source_record = {
         "schema_version": BUNDLE_SCHEMA,
         "source_run_identity": _source_identity(evidence),
@@ -220,18 +380,18 @@ def _write_bundle(
     }
     atomic_json(output / "source_artifacts.json", source_record)
     shutil.copyfile(evidence.run_dir / "config.resolved.yaml", output / "config.resolved.yaml")
-    protocol = _protocol(evidence.config, n_permutations)
+    protocol = _protocol(evidence.config)
     bundle = {
         "schema_version": BUNDLE_SCHEMA,
         "primary_relation": PRIMARY_RELATION,
         "secondary_relations": list(SECONDARY_RELATIONS),
         "relations": relation_records,
         "selection_protocol": protocol,
-        "permutation_results": "permutation_results.csv",
         "source_artifacts": "source_artifacts.json",
         "source_selection_artifacts_hash": source_hash,
         "primary_alias": "selection_lock.json" if primary_lock is not None else None,
         "secondary_claim_status": "predefined_selected_not_tested",
+        "permutation_status": "requires_all_head_test_evidence_and_is_not_part_of_lock_derivation",
         "test_outcomes_used": False,
     }
     atomic_json(output / "relation_selection_bundle.json", bundle)
@@ -659,6 +819,8 @@ def _make_lock(
     relation: str,
     result: dict[str, Any],
     candidate_hash: str,
+    select_candidates: pd.DataFrame,
+    dev_candidates: pd.DataFrame,
 ) -> SelectionLock:
     winner = result["winner"]
     relation_rows = evidence.select_rows[evidence.select_rows["relation"] == relation]
@@ -669,6 +831,11 @@ def _make_lock(
         .tolist()
     )
     config = evidence.config
+    select_evidence_hash = _relation_evidence_hash(evidence.select_rows, relation)
+    dev_evidence_hash = _relation_evidence_hash(evidence.dev_rows, relation)
+    selection_evidence_hash = canonical_hash(
+        {"select": select_evidence_hash, "dev": dev_evidence_hash}
+    )
     settings = {
         "protocol_schema_version": PROTOCOL_SCHEMA,
         "selection_status": "selected",
@@ -691,9 +858,12 @@ def _make_lock(
         "dataset_release": config.dataset.release,
         "dataset_revision": config.dataset.revision,
         "source_run_identity": _source_identity(evidence),
-        "source_selection_artifact_hashes": evidence.stable_hashes,
-        "source_selection_artifacts_hash": canonical_hash(evidence.stable_hashes),
+        "select_evidence_hash": select_evidence_hash,
+        "dev_evidence_hash": dev_evidence_hash,
+        "selection_evidence_hash": selection_evidence_hash,
         "candidate_table_hash": candidate_hash,
+        "select_candidate_evidence": _candidate_records(select_candidates),
+        "dev_decision_evidence": _candidate_records(dev_candidates),
         "steps": config.experiment.steps,
         "selection_progress": selection_progress(config),
         "selection_timestep": round(
@@ -732,69 +902,7 @@ def _make_lock(
     )
 
 
-def _permutation_results(
-    evidence: SourceEvidence,
-    relation_records: dict[str, dict[str, Any]],
-    *,
-    n_permutations: int,
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for relation in RELATION_NAMES:
-        record = relation_records[relation]
-        base = {
-            "relation": relation,
-            "role": record["role"],
-            "family": "primary_separate" if relation == PRIMARY_RELATION else "five_secondaries",
-            "status": record["status"],
-            "raw_p_value": np.nan,
-            "holm_adjusted_p_value": np.nan,
-            "n_permutations": 0,
-            "observed_dev_accuracy": np.nan,
-            "null_mean": np.nan,
-            "null_std": np.nan,
-            "reason": record["reason"],
-        }
-        if record["status"] == "selected":
-            permutation = selection_aware_permutation(
-                evidence.select_rows,
-                evidence.dev_rows,
-                relation=relation,
-                top_k=TOP_K,
-                n_permutations=n_permutations,
-                seed=PERMUTATION_SEED,
-                minimum_denominator=MINIMUM_DENOMINATOR,
-            )
-            base.update(
-                {
-                    "raw_p_value": permutation["p_value"],
-                    "n_permutations": permutation["n_permutations"],
-                    "observed_dev_accuracy": permutation.get("observed_dev_accuracy", np.nan),
-                    "null_mean": permutation.get("null_mean", np.nan),
-                    "null_std": permutation.get("null_std", np.nan),
-                    "reason": permutation.get("reason"),
-                }
-            )
-        rows.append(base)
-    _apply_secondary_holm(rows)
-    return rows
-
-
-def _apply_secondary_holm(rows: list[dict[str, Any]]) -> None:
-    eligible = [
-        row
-        for row in rows
-        if row["relation"] in SECONDARY_RELATIONS and not pd.isna(row["raw_p_value"])
-    ]
-    eligible.sort(key=lambda row: (row["raw_p_value"], SECONDARY_RELATIONS.index(row["relation"])))
-    running = 0.0
-    family_size = len(SECONDARY_RELATIONS)
-    for rank, row in enumerate(eligible, start=1):
-        adjusted = min(1.0, (family_size - rank + 1) * float(row["raw_p_value"]))
-        running = max(running, adjusted)
-        row["holm_adjusted_p_value"] = running
-
-
-def _protocol(config: RunConfig, n_permutations: int) -> dict[str, Any]:
+def _protocol(config: RunConfig) -> dict[str, Any]:
     return {
         "schema_version": PROTOCOL_SCHEMA,
         "relations": list(RELATION_NAMES),
@@ -807,15 +915,35 @@ def _protocol(config: RunConfig, n_permutations: int) -> dict[str, Any]:
         "dev_gate": "select top-K candidates only",
         "dev_order": ["accuracy desc", "n_total desc", "layer asc", "head asc"],
         "insufficient_evidence_policy": "record status and reason; never force a lock",
-        "permutations": n_permutations,
-        "permutation_seed": PERMUTATION_SEED,
-        "multiplicity": "primary raw p separate; Holm across the five predefined secondaries",
+        "test_data_used": False,
         "steps": config.experiment.steps,
         "selection_progress": selection_progress(config),
         "selection_timestep": round(selection_progress(config) * (config.experiment.steps - 1)),
         "row_aggregation": config.experiment.scoring.attender_rows,
         "span_aggregation": config.experiment.scoring.receiver_span,
     }
+
+
+def _relation_evidence_hash(rows: pd.DataFrame, relation: str) -> str:
+    columns = [
+        "sentence_id",
+        "instance_id",
+        "seed",
+        "relation",
+        "layer",
+        "head",
+        "predicted_word_idx",
+        "gold_receiver_word_idx",
+        "correct",
+    ]
+    relation_rows = rows.loc[rows["relation"] == relation, columns].sort_values(
+        ["sentence_id", "instance_id", "seed", "layer", "head"], kind="mergesort"
+    )
+    return canonical_hash(relation_rows.to_dict("records"))
+
+
+def _candidate_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    return frame.astype(object).where(pd.notna(frame), None).to_dict("records")
 
 
 def _source_identity(evidence: SourceEvidence) -> dict[str, Any]:
@@ -879,7 +1007,6 @@ def _validate_written_bundle(output: Path, source_hash: str) -> dict[str, Any]:
         "config.resolved.yaml",
         "run_metadata.json",
         "summary.json",
-        "permutation_results.csv",
     }
     missing = sorted(name for name in required if not (output / name).is_file())
     if missing:
@@ -944,15 +1071,20 @@ def _validate_written_bundle(output: Path, source_hash: str) -> dict[str, Any]:
                     if lock.get("candidate_scores_hash") != record.get("candidate_table_hash"):
                         errors.append(f"{relation} lock candidate hash mismatch")
                     settings = lock.get("frozen_settings", {})
-                    if settings.get("source_selection_artifacts_hash") != source_hash:
-                        errors.append(f"{relation} lock source-artifact hash mismatch")
                     if settings.get("relation_role") != _relation_role(relation):
                         errors.append(f"{relation} lock role mismatch")
+                    evidence_hash = canonical_hash(
+                        {
+                            "select": settings.get("select_evidence_hash"),
+                            "dev": settings.get("dev_evidence_hash"),
+                        }
+                    )
+                    if evidence_hash != settings.get("selection_evidence_hash"):
+                        errors.append(f"{relation} lock selection-evidence hash mismatch")
+                    if record.get("selection_lock_hash") != selection_lock_hash(lock):
+                        errors.append(f"{relation} selection-lock hash mismatch")
             elif record.get("lock") is not None:
                 errors.append(f"{relation} insufficient-evidence record has a fabricated lock")
-        permutation = pd.read_csv(output / "permutation_results.csv")
-        if set(permutation.get("relation", pd.Series(dtype=str))) != set(RELATION_NAMES):
-            errors.append("permutation results do not contain exactly the six relations")
         primary = bundle.get("relations", {}).get(PRIMARY_RELATION, {})
         if primary.get("status") == "selected":
             alias = output / "selection_lock.json"

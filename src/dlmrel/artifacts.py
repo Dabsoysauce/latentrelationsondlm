@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import platform
 import subprocess
@@ -14,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 
 RUN_SCHEMA = "dlmrel-run-v1"
@@ -37,8 +39,35 @@ class ArtifactError(RuntimeError):
 
 
 def canonical_hash(value: Any) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    encoded = json.dumps(
+        json_compatible(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def json_compatible(value: Any, *, location: str = "$") -> Any:
+    """Recursively normalize NumPy/Parquet values into strict JSON values."""
+    if isinstance(value, np.ndarray):
+        return [json_compatible(item, location=f"{location}[]") for item in value.tolist()]
+    if isinstance(value, np.generic):
+        return json_compatible(value.item(), location=location)
+    if isinstance(value, dict):
+        normalized = {}
+        for key, item in value.items():
+            normalized_key = json_compatible(key, location=f"{location}.<key>")
+            if not isinstance(normalized_key, (str, int, float, bool, type(None))):
+                raise ArtifactError(f"non-JSON mapping key at {location}: {key!r}")
+            normalized[normalized_key] = json_compatible(item, location=f"{location}.{key}")
+        return normalized
+    if isinstance(value, (list, tuple)):
+        return [json_compatible(item, location=f"{location}[]") for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ArtifactError(f"non-finite float at {location}: {value!r}")
+    return value
 
 
 def selection_lock_scientific_dict(value: SelectionLock | dict[str, Any]) -> dict[str, Any]:
@@ -52,6 +81,35 @@ def selection_lock_hash(value: SelectionLock | dict[str, Any]) -> str:
     return canonical_hash(selection_lock_scientific_dict(value))
 
 
+def selection_source_hash(path: str | Path) -> str:
+    """Hash a legacy object lock or the scientific identities in a six-lock manifest."""
+    source = Path(path)
+    if source.is_dir() and (source / "relation-selection").is_dir():
+        source = source / "relation-selection"
+    manifest = (
+        source / "relation_selection_bundle.json"
+        if source.is_dir()
+        else source
+    )
+    if manifest.name == "relation_selection_bundle.json":
+        bundle = json.loads(manifest.read_text(encoding="utf-8"))
+        relations = bundle.get("relations", {})
+        identities = {
+            relation: record.get("selection_lock_hash")
+            for relation, record in relations.items()
+        }
+        if not identities or any(value is None for value in identities.values()):
+            raise ArtifactError("relation-lock manifest has incomplete scientific identities")
+        return canonical_hash(
+            {
+                "schema_version": bundle.get("schema_version"),
+                "primary_relation": bundle.get("primary_relation"),
+                "relation_lock_hashes": identities,
+            }
+        )
+    return selection_lock_hash(json.loads(source.read_text(encoding="utf-8")))
+
+
 def scientific_configuration(
     config: dict[str, Any], *, resolved_selection_lock_hash: str | None = None
 ) -> dict[str, Any]:
@@ -62,8 +120,7 @@ def scientific_configuration(
     if lock_path:
         digest = resolved_selection_lock_hash
         if digest is None:
-            lock = json.loads(Path(lock_path).read_text(encoding="utf-8"))
-            digest = selection_lock_hash(lock)
+            digest = selection_source_hash(lock_path)
         value["selection_lock_hash"] = digest
     return value
 
@@ -72,7 +129,10 @@ def atomic_json(path: str | Path, value: Any) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True), encoding="utf-8")
+    temporary.write_text(
+        json.dumps(json_compatible(value), indent=2, sort_keys=True, allow_nan=False),
+        encoding="utf-8",
+    )
     os.replace(temporary, path)
 
 
@@ -104,7 +164,7 @@ class SelectionLock:
 
     def write_once(self, path: str | Path) -> None:
         path = Path(path)
-        payload = asdict(self)
+        payload = json_compatible(asdict(self))
         if path.exists():
             existing = json.loads(path.read_text(encoding="utf-8"))
             if existing != payload:
@@ -158,9 +218,7 @@ def initialize_run(
     lock_path = (config.get("runtime") or {}).get("selection_lock")
     current_lock_hash = None
     if lock_path:
-        current_lock_hash = selection_lock_hash(
-            json.loads(Path(lock_path).read_text(encoding="utf-8"))
-        )
+        current_lock_hash = selection_source_hash(lock_path)
     scientific = scientific_configuration(
         config, resolved_selection_lock_hash=current_lock_hash
     )
@@ -176,9 +234,7 @@ def initialize_run(
         existing_lock_path = (existing.get("runtime") or {}).get("selection_lock")
         if stored_lock_hash is None and existing_lock_path:
             try:
-                stored_lock_hash = selection_lock_hash(
-                    json.loads(Path(existing_lock_path).read_text(encoding="utf-8"))
-                )
+                stored_lock_hash = selection_source_hash(existing_lock_path)
             except FileNotFoundError:
                 # Pre-normalization metadata did not retain this digest. If the
                 # original path moved, the incoming lock is the only identity
@@ -227,11 +283,12 @@ def write_shard(run_dir: str | Path, shard_id: int, payload: list[dict[str, Any]
     directory = Path(run_dir) / "checkpoints"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"shard-{shard_id:06d}.json"
+    normalized_payload = json_compatible(payload)
     value = {
         "schema_version": RUN_SCHEMA,
         "shard_id": shard_id,
-        "rows": payload,
-        "rows_hash": canonical_hash(payload),
+        "rows": normalized_payload,
+        "rows_hash": canonical_hash(normalized_payload),
     }
     if path.exists():
         current = json.loads(path.read_text(encoding="utf-8"))

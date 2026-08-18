@@ -56,16 +56,27 @@ and reads only the saved select/dev evidence plus configuration, manifests,
 and provenance. It never reads `instances.parquet`, test metrics, or the
 source summary, and it never modifies the source run.
 
-After head search completes, copy the path to its `selection_lock.json`. Use
-that lock for the EWT time curve and for German/Japanese transfer:
+After head search completes, use the canonical `relation-selection/` directory
+(or its `relation_selection_bundle.json`) for the EWT time curve and for
+German/Japanese transfer. That source contains all six locks and lets each
+downstream relation resolve its own head. Passing the legacy
+`selection_lock.json` is supported only for an explicitly object-only run; it
+cannot produce the other five relation results.
 
 ```bash
-dlmrel run --model configs/models/dream_7b.yaml --dataset configs/datasets/ewt.yaml --experiment configs/experiments/time_curve.yaml --selection-lock <lock-path> --run-id dream-ewt-time-v1
+dlmrel run --model configs/models/dream_7b.yaml --dataset configs/datasets/ewt.yaml --experiment configs/experiments/time_curve.yaml --selection-lock <relation-selection-directory> --run-id dream-ewt-time-v1
 dlmrel prepare --dataset configs/datasets/de_gsd.yaml
-dlmrel run --model configs/models/dream_7b.yaml --dataset configs/datasets/de_gsd.yaml --experiment configs/experiments/external_transfer.yaml --selection-lock <lock-path> --run-id dream-de-v1
+dlmrel run --model configs/models/dream_7b.yaml --dataset configs/datasets/de_gsd.yaml --experiment configs/experiments/external_transfer.yaml --selection-lock <relation-selection-directory> --run-id dream-de-v1
 dlmrel prepare --dataset configs/datasets/ja_gsd.yaml
-dlmrel run --model configs/models/dream_7b.yaml --dataset configs/datasets/ja_gsd.yaml --experiment configs/experiments/external_transfer.yaml --selection-lock <lock-path> --run-id dream-ja-v1
+dlmrel run --model configs/models/dream_7b.yaml --dataset configs/datasets/ja_gsd.yaml --experiment configs/experiments/external_transfer.yaml --selection-lock <relation-selection-directory> --run-id dream-ja-v1
 ```
+
+The existing Dream select/dev all-head files remain reusable for CPU-only
+six-lock derivation. The saved object-selected test rows do not contain the
+other five locked heads, and the corrected selection-aware permutation needs
+all-head test predictions because a null permutation can select any eligible
+head. Those targeted test computations still require a new GPU run; deriving
+locks alone does not create or imply them.
 
 Repeat with `configs/models/diffullama_7b.yaml`. Run attention entropy, logit
 lens, and POS probe only after the model smoke test passes. Save complete run

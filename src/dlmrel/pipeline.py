@@ -11,8 +11,9 @@ from typing import Any
 
 import torch
 
-from .artifacts import ArtifactError, SelectionLock, atomic_json
+from .artifacts import ArtifactError, atomic_json
 from .config import RunConfig
+from .relation_selection import RelationLockSet, load_relation_locks
 
 
 def load_adapter(cfg: RunConfig):
@@ -29,19 +30,16 @@ def load_adapter(cfg: RunConfig):
     return model, tokenizer, metadata
 
 
-def read_source_lock(path: str | Path, cfg: RunConfig) -> SelectionLock:
-    lock = SelectionLock(**json.loads(Path(path).read_text(encoding="utf-8")))
-    if lock.dataset_id != "ewt":
-        raise ArtifactError("selection lock must originate from EWT")
-    if lock.model_id != cfg.model.id or lock.model_revision != cfg.model.revision:
-        raise ArtifactError("selection lock model/revision mismatch")
-    return lock
+def read_source_locks(path: str | Path, cfg: RunConfig) -> RelationLockSet:
+    return load_relation_locks(path, cfg)
 
 
 def run_real(cfg: RunConfig, run_dir: Path, manifest_hashes: dict[str, str]) -> None:
     """Dispatch one validated configuration to its sole experiment runner."""
+    source_locks = (
+        read_source_locks(cfg.runtime.selection_lock, cfg) if cfg.runtime.selection_lock else None
+    )
     model, tokenizer, model_metadata = load_adapter(cfg)
-    source_lock = read_source_lock(cfg.runtime.selection_lock, cfg) if cfg.runtime.selection_lock else None
 
     if cfg.experiment.type == "head_search":
         from .experiments.head_search import run
@@ -52,14 +50,14 @@ def run_real(cfg: RunConfig, run_dir: Path, manifest_hashes: dict[str, str]) -> 
             cfg,
             run_dir,
             manifest_hashes=manifest_hashes,
-            source_lock=source_lock,
+            source_locks=source_locks,
         )
     elif cfg.experiment.type == "time_curve":
-        if source_lock is None:
+        if source_locks is None:
             raise ArtifactError("time curves require --selection-lock from EWT head search")
         from .experiments.time_curve import run
 
-        details = run(model, tokenizer, cfg, run_dir, source_lock=source_lock)
+        details = run(model, tokenizer, cfg, run_dir, source_locks=source_locks)
     elif cfg.experiment.type == "attention_entropy":
         from .experiments.attention_entropy import run
 

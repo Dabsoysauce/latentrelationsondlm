@@ -12,10 +12,18 @@
   relations, with enforced denominators, per-seed evidence, selection-aware
   permutation tests, Holm correction for the five predefined secondaries, and
   a CPU-only derivation command for completed all-head runs.
+- Central strict JSON normalization for NumPy/Parquet values, deterministic
+  checkpointed within-instance permutation inference, and relation-aware
+  downstream lock resolution.
 
 CPU tests verify the protocol plumbing. Real-model GPU smoke tests and full
 experiments have not yet been run in this implementation; “implemented” does
 not mean “scientifically validated.”
+
+Existing Dream select/dev all-head inference remains reusable for six-lock
+derivation, but its object-head-only test rows do not provide five secondary
+test results or the all-head test evidence required by the corrected
+permutation null.
 
 ## Why earlier results are preliminary
 
