@@ -78,7 +78,18 @@ all-head test predictions because a null permutation can select any eligible
 head. Those targeted test computations still require a new GPU run; deriving
 locks alone does not create or imply them.
 
+For the interrupted `dream-english-head-3seed-v1` run, do not restart the full
+head search. Follow the copy-first two-phase procedure in
+`docs/HEAD_SEARCH_RECOVERY.md`: run `recover-head-search-test-grid` once on GPU,
+then run the model-free `finalize-head-search` command on CPU. Both commands
+resume compatible partial work, and the original Drive run remains untouched.
+
 Repeat with `configs/models/diffullama_7b.yaml`. Run attention entropy, logit
 lens, and POS probe only after the model smoke test passes. Save complete run
 directories to Drive before ending a Colab session, and run `dlmrel validate`
 before treating any output as a research result.
+
+For optional serverless execution, the thin Modal wrapper invokes these same
+commands without changing their science. Start with the credential-free local
+dry run and supervised workflow in `docs/MODAL.md`; no paid job or result
+promotion is automatic.

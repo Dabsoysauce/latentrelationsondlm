@@ -76,7 +76,9 @@ def entropy_rows(model, tokenizer, examples, cfg: RunConfig, *, seed: int, progr
             no_bos /= no_bos.sum(dim=-1, keepdim=True).clamp_min(1e-12)
             entropy_no_bos = -(no_bos * no_bos.clamp_min(1e-12).log()).sum(dim=-1)
             valid_keys = probability.shape[-1]
+            normalization = float(np.log(valid_keys)) if valid_keys > 1 else None
             for head in range(probability.shape[0]):
+                mean_entropy = float(entropy[head].mean())
                 rows.append(
                     {
                         "sentence_id": example.sentence_id,
@@ -86,8 +88,10 @@ def entropy_rows(model, tokenizer, examples, cfg: RunConfig, *, seed: int, progr
                         "normalized_progress": progress,
                         "layer": layer,
                         "head": head,
-                        "entropy": float(entropy[head].mean()),
-                        "entropy_normalized": float(entropy[head].mean() / np.log(valid_keys)),
+                        "entropy": mean_entropy,
+                        "entropy_normalized": (
+                            mean_entropy / normalization if normalization is not None else 0.0
+                        ),
                         "entropy_no_bos": float(entropy_no_bos[head].mean()),
                         "bos_sink_mass": float(probability[head, :, 0].mean()),
                         "valid_key_count": valid_keys,

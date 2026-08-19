@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -16,32 +17,67 @@ from ..diffusion import states_at_time
 from ..relations import Example
 from .shared import write_frames
 
+REGULARIZATION_GRID = (0.01, 0.1, 1.0, 10.0)
+
+
+@dataclass
+class FittedProbe:
+    scaler: Any
+    classifier: Any
+    selected_c: float
+    train_x: np.ndarray
+    train_y: np.ndarray
+    train_forms: np.ndarray
+
 
 def run(model, tokenizer, cfg: RunConfig, run_dir: Path) -> dict[str, Any]:
-    examples_by_role = {}
     exclusions = []
     checkpoint_store = SentenceCheckpointStore(run_dir)
-    for role in ("select", "dev", "test"):
+    examples_by_role = {}
+    for role in ("select", "dev"):
         examples, dropped = load_manifest_examples(cfg, tokenizer, role)
         exclusions.append(dropped)
         examples_by_role[role] = examples
 
+    fitted = {}
+    for seed in cfg.experiment.seeds:
+        select = masked_features(
+            model,
+            tokenizer,
+            examples_by_role["select"],
+            cfg,
+            seed=seed,
+            role="select",
+            checkpoint_store=checkpoint_store,
+        )
+        dev = masked_features(
+            model,
+            tokenizer,
+            examples_by_role["dev"],
+            cfg,
+            seed=seed,
+            role="dev",
+            checkpoint_store=checkpoint_store,
+        )
+        fitted[seed] = fit_probe(select, dev, seed)
+
+    # No test manifest, features, labels, or forms are read until every seed's
+    # regularization choice has been frozen from select/dev alone.
+    test_examples, test_dropped = load_manifest_examples(cfg, tokenizer, "test")
+    exclusions.append(test_dropped)
     raw_frames = []
     seed_metrics = []
     for seed in cfg.experiment.seeds:
-        collected = {
-            role: masked_features(
-                model,
-                tokenizer,
-                examples,
-                cfg,
-                seed=seed,
-                role=role,
-                checkpoint_store=checkpoint_store,
-            )
-            for role, examples in examples_by_role.items()
-        }
-        raw, metrics = evaluate_seed(collected, seed)
+        test = masked_features(
+            model,
+            tokenizer,
+            test_examples,
+            cfg,
+            seed=seed,
+            role="test",
+            checkpoint_store=checkpoint_store,
+        )
+        raw, metrics = evaluate_fitted_probe(fitted[seed], test, seed)
         raw_frames.append(raw)
         seed_metrics.append(metrics)
 
@@ -59,18 +95,21 @@ def run(model, tokenizer, cfg: RunConfig, run_dir: Path) -> dict[str, Any]:
     }
 
 
-def evaluate_seed(collected, seed: int) -> tuple[pd.DataFrame, dict[str, Any]]:
+def fit_probe(select, dev, seed: int) -> FittedProbe:
     from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import accuracy_score, f1_score
+    from sklearn.metrics import accuracy_score
     from sklearn.preprocessing import StandardScaler
 
-    train_x, train_y, _, train_forms = collected["select"]
-    dev_x, dev_y, _, _ = collected["dev"]
-    test_x, test_y, test_groups, test_forms = collected["test"]
+    train_x, train_y, _, train_forms, _ = _validated_features(select, "select")
+    dev_x, dev_y, _, _, _ = _validated_features(dev, "dev")
+    if len(np.unique(train_y)) < 2:
+        raise ValueError("POS select features must contain at least two classes")
+    if train_x.shape[1] != dev_x.shape[1]:
+        raise ValueError("POS select and dev feature dimensions differ")
     scaler = StandardScaler().fit(train_x)
 
     candidates = []
-    for regularization in (0.01, 0.1, 1.0, 10.0):
+    for regularization in REGULARIZATION_GRID:
         classifier = LogisticRegression(C=regularization, max_iter=2000, random_state=seed)
         classifier.fit(scaler.transform(train_x), train_y)
         accuracy = accuracy_score(dev_y, classifier.predict(scaler.transform(dev_x)))
@@ -79,6 +118,33 @@ def evaluate_seed(collected, seed: int) -> tuple[pd.DataFrame, dict[str, Any]]:
 
     classifier = LogisticRegression(C=selected_c, max_iter=2000, random_state=seed)
     classifier.fit(scaler.transform(train_x), train_y)
+    return FittedProbe(
+        scaler=scaler,
+        classifier=classifier,
+        selected_c=float(selected_c),
+        train_x=train_x.copy(),
+        train_y=train_y.copy(),
+        train_forms=train_forms.copy(),
+    )
+
+
+def evaluate_fitted_probe(
+    fitted: FittedProbe, test, seed: int
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score, f1_score
+
+    test_x, test_y, test_groups, test_forms, test_word_indices = _validated_features(
+        test, "test"
+    )
+    if test_x.shape[1] != fitted.scaler.n_features_in_:
+        raise ValueError("POS test feature dimension differs from select")
+    train_y = fitted.train_y
+    train_x = fitted.train_x
+    train_forms = fitted.train_forms
+    selected_c = fitted.selected_c
+    scaler = fitted.scaler
+    classifier = fitted.classifier
     prediction = classifier.predict(scaler.transform(test_x))
     majority = Counter(train_y).most_common(1)[0][0]
     lexical = lexical_predictions(train_forms, train_y, test_forms, majority)
@@ -93,13 +159,15 @@ def evaluate_seed(collected, seed: int) -> tuple[pd.DataFrame, dict[str, Any]]:
     )
     random_feature = (
         LogisticRegression(C=selected_c, max_iter=2000, random_state=seed)
-        .fit(rng.normal(size=train_x.shape), train_y)
+        .fit(rng.normal(size=(len(train_y), test_x.shape[1])), train_y)
         .predict(rng.normal(size=test_x.shape))
     )
     raw = pd.DataFrame(
         {
             "seed": seed,
             "sentence_id": test_groups,
+            "word_index": test_word_indices,
+            "form": test_forms,
             "gold_upos": test_y,
             "prediction": prediction,
             "lexical_prediction": lexical,
@@ -111,7 +179,7 @@ def evaluate_seed(collected, seed: int) -> tuple[pd.DataFrame, dict[str, Any]]:
         "seed": seed,
         "selected_c": selected_c,
         "accuracy": accuracy_score(test_y, prediction),
-        "macro_f1": f1_score(test_y, prediction, average="macro"),
+        "macro_f1": f1_score(test_y, prediction, average="macro", zero_division=0),
         "majority_accuracy": accuracy_score(test_y, np.repeat(majority, len(test_y))),
         "lexical_accuracy": accuracy_score(test_y, lexical),
         "shuffled_accuracy": accuracy_score(test_y, shuffled),
@@ -120,6 +188,31 @@ def evaluate_seed(collected, seed: int) -> tuple[pd.DataFrame, dict[str, Any]]:
         "n_test_sentences": len(set(test_groups)),
     }
     return raw, metrics
+
+
+def evaluate_seed(collected, seed: int) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Compatibility wrapper for direct select/dev/test unit evaluation."""
+    fitted = fit_probe(collected["select"], collected["dev"], seed)
+    return evaluate_fitted_probe(fitted, collected["test"], seed)
+
+
+def _validated_features(features, role: str):
+    try:
+        x, y, groups, forms, word_indices = features
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"POS {role} features must be a five-array tuple") from error
+    x = np.asarray(x)
+    y = np.asarray(y)
+    groups = np.asarray(groups)
+    forms = np.asarray(forms)
+    word_indices = np.asarray(word_indices)
+    if x.ndim != 2 or x.shape[0] == 0 or x.shape[1] == 0:
+        raise ValueError(f"POS {role} features must be a nonempty 2D matrix")
+    if not (len(x) == len(y) == len(groups) == len(forms) == len(word_indices)):
+        raise ValueError(f"POS {role} feature arrays have inconsistent lengths")
+    if not np.isfinite(x.astype(float)).all():
+        raise ValueError(f"POS {role} features contain non-finite values")
+    return x, y, groups, forms, word_indices
 
 
 def aggregate_probe_metrics(per_seed: pd.DataFrame) -> pd.DataFrame:
@@ -170,12 +263,19 @@ def masked_features(
             ),
         )
     if frame.empty:
-        return np.asarray([]), np.asarray([]), np.asarray([]), np.asarray([])
+        return (
+            np.asarray([]),
+            np.asarray([]),
+            np.asarray([]),
+            np.asarray([]),
+            np.asarray([]),
+        )
     return (
         np.stack(frame["feature"].map(np.asarray)),
         frame["label"].to_numpy(),
         frame["sentence_id"].to_numpy(),
         frame["form"].to_numpy(),
+        frame["word_index"].to_numpy(),
     )
 
 

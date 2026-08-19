@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from dlmrel.artifacts import ArtifactError
-from dlmrel.experiments.head_search import _apply_secondary_holm
+from dlmrel.head_search_recovery import _apply_secondary_holm
 from dlmrel.permutation import randomized_receiver_labels, selection_aware_permutation
 from dlmrel.relation_selection import PRIMARY_RELATION, SECONDARY_RELATIONS
 
@@ -193,6 +193,41 @@ def test_incompatible_or_unrequested_checkpoint_reuse_is_rejected(tmp_path):
             resume=True,
             scientific_config_hash="changed-science",
         )
+
+
+@pytest.mark.parametrize("corruption", ["nonfinite", "head", "status", "overrun"])
+def test_corrupt_permutation_progress_fails_safely(tmp_path, corruption):
+    select, dev, test = (_rows(role) for role in ("select", "dev", "test"))
+    checkpoint = tmp_path / "permutation.json"
+    _run(select, dev, test, checkpoint_path=checkpoint, max_new_permutations=3)
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    if corruption == "nonfinite":
+        saved["null_statistics"][0] = float("nan")
+    elif corruption == "head":
+        saved["selected_heads"][0] = [999, 999]
+    elif corruption == "status":
+        saved["completion_status"] = "complete"
+    else:
+        saved["completed_permutation_indices"] = list(range(21))
+        saved["null_statistics"] = [0.0] * 21
+        saved["selected_heads"] = [saved["selected_heads"][0]] * 21
+        saved["completion_status"] = "complete"
+    checkpoint.write_text(json.dumps(saved), encoding="utf-8")
+
+    with pytest.raises(ArtifactError, match="permutation checkpoint"):
+        _run(select, dev, test, checkpoint_path=checkpoint, resume=True)
+
+
+def test_incomplete_permutation_temporary_file_is_removed(tmp_path):
+    select, dev, test = (_rows(role) for role in ("select", "dev", "test"))
+    checkpoint = tmp_path / "permutation.json"
+    temporary = checkpoint.with_suffix(checkpoint.suffix + ".tmp")
+    temporary.write_bytes(b"incomplete")
+
+    result = _run(select, dev, test, checkpoint_path=checkpoint)
+
+    assert result["completion_status"] == "complete"
+    assert not temporary.exists()
 
 
 def test_holm_adjustment_is_limited_to_the_five_predefined_secondaries():

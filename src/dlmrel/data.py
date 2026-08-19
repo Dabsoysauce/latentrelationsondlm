@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict
 from pathlib import Path
@@ -13,7 +14,14 @@ from conllu import parse_incr
 from .artifacts import ArtifactError, atomic_json
 from .config import DatasetConfig, RunConfig
 from .relations import Example, build_example
-from .splits import build_official_manifests, manifest_hash
+from .splits import (
+    ManifestRow,
+    assert_zero_overlap,
+    build_official_manifests,
+    manifest_hash,
+    normalize_text,
+    stable_sentence_id,
+)
 from .treebank import acquire_split
 
 
@@ -64,7 +72,7 @@ def load_manifest_examples(
     path = manifest_root(cfg.dataset) / f"{role}.csv"
     if not path.exists():
         raise ArtifactError(f"missing prepared manifest: {path}")
-    manifest = pd.read_csv(path)
+    manifest = pd.read_csv(path, keep_default_na=False)
     if set(manifest["original_split"]) != {expected_split}:
         raise ArtifactError(f"{role} manifest violates official {expected_split} boundary")
 
@@ -86,7 +94,13 @@ def load_manifest_examples(
             continue
         sentence.metadata["source_treebank"] = cfg.dataset.treebank
         sentence.metadata["source_split"] = expected_split
-        example = build_example(sentence, tokenizer, cfg.dataset, include_bos=True)
+        try:
+            example = build_example(sentence, tokenizer, cfg.dataset, include_bos=True)
+        except (IndexError, RuntimeError, TypeError, UnicodeError, ValueError) as error:
+            exclusions.append(
+                _exclusion(row, role, f"tokenizer_or_alignment_error:{type(error).__name__}")
+            )
+            continue
         if example is None:
             exclusions.append(_exclusion(row, role, "tokenization_alignment_or_relation_filter"))
             continue
@@ -101,10 +115,89 @@ def load_manifest_examples(
 
 
 def load_audit(dataset: DatasetConfig) -> dict[str, Any]:
+    """Load and independently verify prepared manifests and pinned source files."""
     path = manifest_root(dataset) / "audit.json"
     if not path.exists():
         raise ArtifactError(f"missing prepared manifests: {path}")
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        audit = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ArtifactError(f"prepared-manifest audit is unreadable: {path}") from error
+
+    expected_identity = {
+        "schema_version": "dlmrel-manifest-v1",
+        "dataset": dataset.id,
+        "treebank": dataset.treebank,
+        "release": dataset.release,
+        "revision": dataset.revision,
+        "checksums": dataset.checksums,
+        "official_boundaries": True,
+        "zero_overlap": True,
+    }
+    for key, expected in expected_identity.items():
+        if audit.get(key) != expected:
+            raise ArtifactError(f"prepared-manifest audit differs from dataset config at {key}")
+    if set(audit.get("manifest_hashes", {})) != {"select", "dev", "test"}:
+        raise ArtifactError("prepared-manifest audit must contain select/dev/test hashes")
+    if set(audit.get("counts", {})) != {"select", "dev", "test"}:
+        raise ArtifactError("prepared-manifest audit must contain select/dev/test counts")
+
+    source_sentences = {}
+    for split in ("train", "dev", "test"):
+        source_path = acquire_split(dataset, split, download=False)
+        with source_path.open(encoding="utf-8") as stream:
+            source_sentences[split] = list(parse_incr(stream))
+    expected_manifests = build_official_manifests(dataset, source_sentences)
+
+    manifests: dict[str, list[ManifestRow]] = {}
+    expected_splits = {"select": "train", "dev": "dev", "test": "test"}
+    required_columns = {item.name for item in ManifestRow.__dataclass_fields__.values()}
+    for role, original_split in expected_splits.items():
+        manifest_path = manifest_root(dataset) / f"{role}.csv"
+        if not manifest_path.exists():
+            raise ArtifactError(f"missing prepared manifest: {manifest_path}")
+        try:
+            frame = pd.read_csv(manifest_path, keep_default_na=False)
+        except (OSError, ValueError) as error:
+            raise ArtifactError(f"prepared manifest is unreadable: {manifest_path}") from error
+        if set(frame) != required_columns:
+            raise ArtifactError(f"{role} manifest schema fields do not match")
+        rows: list[ManifestRow] = []
+        for raw in frame.to_dict("records"):
+            try:
+                raw["n_words"] = int(raw["n_words"])
+                row = ManifestRow(**raw)
+            except (TypeError, ValueError) as error:
+                raise ArtifactError(f"{role} manifest contains an invalid row") from error
+            normalized = normalize_text(row.normalized_text)
+            text_digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+            expected_sentence_id = stable_sentence_id(
+                dataset.treebank, original_split, row.sent_id, normalized
+            )
+            if (
+                row.role != role
+                or row.original_split != original_split
+                or row.treebank != dataset.treebank
+                or row.language != dataset.language
+                or normalized != row.normalized_text
+                or row.text_sha256 != text_digest
+                or row.sentence_id != expected_sentence_id
+                or row.n_words < dataset.min_words
+            ):
+                raise ArtifactError(f"{role} manifest row identity or boundary is invalid")
+            rows.append(row)
+        if len(rows) != audit["counts"][role]:
+            raise ArtifactError(f"{role} manifest count differs from its audit")
+        if manifest_hash(rows) != audit["manifest_hashes"][role]:
+            raise ArtifactError(f"{role} manifest hash differs from its audit")
+        if rows != expected_manifests[role]:
+            raise ArtifactError(f"{role} manifest differs from deterministic preparation")
+        manifests[role] = rows
+    try:
+        assert_zero_overlap(manifests)
+    except ValueError as error:
+        raise ArtifactError("prepared manifests overlap across official roles") from error
+    return audit
 
 
 def _exclusion(row, role: str, reason: str) -> dict[str, Any]:

@@ -41,6 +41,32 @@ def test_documented_command_surface_parses(capsys):
     assert code == 0
 
 
+def test_prepare_validate_and_compare_command_dispatch(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        cli,
+        "prepare_manifests",
+        lambda _dataset, download: {"prepared": True, "download": download},
+    )
+    assert main(
+        ["prepare", "--dataset", str(ROOT / "configs/datasets/ewt.yaml"), "--no-download"]
+    ) == 0
+    assert '"prepared": true' in capsys.readouterr().out.lower()
+
+    monkeypatch.setattr(cli, "validate_run", lambda _path: {"valid": True, "errors": []})
+    assert main(["validate", "--run-dir", str(tmp_path)]) == 0
+    assert '"valid": true' in capsys.readouterr().out.lower()
+
+    monkeypatch.setattr(
+        cli,
+        "compare_runs",
+        lambda _runs, output: (Path(output), Path(output).with_name("common.csv")),
+    )
+    assert main(
+        ["compare", "--runs", "run-a", "run-b", "--output", str(tmp_path / "out.csv")]
+    ) == 0
+    assert "common.csv" in capsys.readouterr().out
+
+
 def test_external_transfer_requires_non_ewt_and_lock(capsys):
     code = main(
         [
@@ -134,3 +160,55 @@ def test_normal_cli_run_can_continue_with_resume_flag(tmp_path, monkeypatch, cap
         assert set(
             relation_rows[["layer", "head"]].itertuples(index=False, name=None)
         ) == {(lock.layer, lock.head)}
+
+
+def test_fake_cli_exercises_every_active_experiment_artifact_contract(
+    tmp_path, monkeypatch, capsys
+):
+    audit = {
+        "manifest_hashes": {
+            "select": "select-fixture",
+            "dev": "dev-fixture",
+            "test": "test-fixture",
+        }
+    }
+    monkeypatch.setattr(cli, "load_audit", lambda _dataset: audit)
+
+    def run(experiment, run_id, *, dataset="ewt.yaml", lock=None):
+        arguments = [
+            "run",
+            "--model",
+            str(ROOT / "configs/models/fake.yaml"),
+            "--dataset",
+            str(ROOT / "configs/datasets" / dataset),
+            "--experiment",
+            str(ROOT / "configs/experiments" / experiment),
+            "--results",
+            str(tmp_path),
+            "--run-id",
+            run_id,
+        ]
+        if lock is not None:
+            arguments.extend(["--selection-lock", str(lock)])
+        assert main(arguments) == 0, capsys.readouterr().err
+
+    run("head_search.yaml", "head")
+    head = tmp_path / "confirmatory_ewt/fake/ewt/confirmatory_head_search/head"
+    locks = head / "relation-selection"
+    cases = [
+        ("time_curve.yaml", "time", "ewt.yaml", locks, "time_curve"),
+        ("attention_entropy.yaml", "entropy", "ewt.yaml", None, "attention_entropy"),
+        ("logit_lens.yaml", "lens", "ewt.yaml", None, "logit_lens"),
+        ("pos_probe.yaml", "probe", "ewt.yaml", None, "pos_probe"),
+        ("external_transfer.yaml", "german", "de_gsd.yaml", locks, None),
+    ]
+    for experiment, run_id, dataset, lock, expected_runner in cases:
+        run(experiment, run_id, dataset=dataset, lock=lock)
+        matches = list(tmp_path.glob(f"*/*/*/*/{run_id}/validation.json"))
+        assert len(matches) == 1
+        validation = json.loads(matches[0].read_text(encoding="utf-8"))
+        summary = json.loads(matches[0].with_name("summary.json").read_text(encoding="utf-8"))
+        assert validation["valid"] is True
+        assert summary["completion_status"] == "complete"
+        if expected_runner is not None:
+            assert summary["fake_validation_runner"] == expected_runner
