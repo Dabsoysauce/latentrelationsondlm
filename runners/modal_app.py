@@ -95,6 +95,26 @@ class SpecError(ValueError):
     """A submitted run could escape the allowlisted operational surface."""
 
 
+class CheckoutError(RuntimeError):
+    """A Git checkout command failed with captured diagnostic output."""
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        command: list[str],
+        returncode: int,
+        stdout: str,
+        stderr: str,
+    ) -> None:
+        super().__init__(f"git {stage} failed with exit code {returncode}")
+        self.stage = stage
+        self.command = command
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
 @dataclass(frozen=True)
 class ResourceProfile:
     name: str
@@ -523,6 +543,46 @@ def classify_failure(message: str, *, exit_code: int | None = None) -> str:
     return "unknown"
 
 
+def classify_checkout_failure(message: str) -> str:
+    """Conservatively distinguish retryable Git transport errors from permanent failures."""
+    value = message.lower()
+    permanent = (
+        "repository not found",
+        "authentication failed",
+        "permission denied",
+        "access denied",
+        "could not read from remote repository",
+        "not our ref",
+        "couldn't find remote ref",
+        "reference is not a tree",
+        "invalid object name",
+        "malformed url",
+        "url using bad/illegal format",
+    )
+    if any(piece in value for piece in permanent):
+        return "unknown"
+    transient = (
+        "could not resolve host",
+        "temporary failure in name resolution",
+        "connection timed out",
+        "connection timeout",
+        "connection reset",
+        "failed to connect",
+        "tls handshake timeout",
+        "gnutls_handshake() failed",
+        "tls connection was non-properly terminated",
+        "ssl connection",
+        "temporary network failure",
+        "network connection was lost",
+        "unexpected eof while reading",
+        "remote end hung up",
+        "network is unreachable",
+    )
+    if any(piece in value for piece in transient):
+        return "transient_infrastructure"
+    return "unknown"
+
+
 @dataclass(frozen=True)
 class RunResult:
     schema_version: str
@@ -737,28 +797,46 @@ def stream_process(
     return ProcessOutcome(exit_code, "".join(stdout_tail)[-TAIL_LIMIT:], "".join(stderr_tail)[-TAIL_LIMIT:])
 
 
+def _run_git_checkout(command: list[str], *, stage: str) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        command,
+        check=False,
+        shell=False,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+    if result.returncode != 0:
+        raise CheckoutError(
+            stage=stage,
+            command=command,
+            returncode=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+    return result
+
+
 def checkout_exact_commit(commit: str, destination: Path) -> Path:
     if not COMMIT_SHA.fullmatch(commit):
         raise SpecError("refusing to checkout a non-immutable commit")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
+    _run_git_checkout(
         ["git", "clone", "--filter=blob:none", "--no-checkout", REPOSITORY_URL, str(destination)],
-        check=True,
-        shell=False,
+        stage="clone",
     )
-    subprocess.run(
+    _run_git_checkout(
         ["git", "-C", str(destination), "fetch", "--depth", "1", "origin", commit],
-        check=True,
-        shell=False,
+        stage="fetch",
     )
-    subprocess.run(
+    _run_git_checkout(
         ["git", "-C", str(destination), "checkout", "--detach", "FETCH_HEAD"],
-        check=True,
-        shell=False,
+        stage="checkout",
     )
-    actual = subprocess.check_output(
-        ["git", "-C", str(destination), "rev-parse", "HEAD"], text=True
-    ).strip()
+    actual = _run_git_checkout(
+        ["git", "-C", str(destination), "rev-parse", "HEAD"],
+        stage="rev-parse",
+    ).stdout.strip()
     if actual != commit:
         raise SpecError("checked-out repository commit differs from RunSpec")
     subprocess.run(
@@ -1055,37 +1133,67 @@ def execute_spec(
 
 def _failed_before_worker(spec: RunSpec, error: Exception) -> RunResult:
     now = datetime.now(timezone.utc).isoformat()
-    evidence = redact_secrets("".join(traceback.format_exception(error))[-TAIL_LIMIT:])
-    category = classify_failure(evidence)
+    if isinstance(error, CheckoutError):
+        stdout_tail = redact_secrets(error.stdout)[-TAIL_LIMIT:]
+        stderr_tail = redact_secrets(error.stderr)[-TAIL_LIMIT:]
+        evidence = stderr_tail or stdout_tail or redact_secrets(str(error))
+        category = classify_checkout_failure(evidence)
+        exit_code = error.returncode
+        command = [redact_secrets(piece) for piece in error.command]
+        stage = f"checkout:{error.stage}"
+    elif isinstance(error, SpecError):
+        stdout_tail = ""
+        stderr_tail = redact_secrets(str(error))[-TAIL_LIMIT:]
+        evidence = stderr_tail
+        category = "unknown"
+        exit_code = None
+        command = []
+        stage = "checkout:validation"
+    else:
+        stdout_tail = ""
+        stderr_tail = redact_secrets("".join(traceback.format_exception(error))[-TAIL_LIMIT:])
+        evidence = stderr_tail
+        category = classify_failure(evidence)
+        exit_code = None
+        command = []
+        stage = "checkout"
+    recommendation = (
+        "retry_same_commit_once"
+        if category == "transient_infrastructure"
+        else "stop_for_human_review"
+    )
     return RunResult(
-        RUN_RESULT_SCHEMA,
-        "failed",
-        None,
-        spec.attempt,
-        spec.git_commit,
-        spec.operation,
-        [],
-        None,
-        {},
-        None,
-        now,
-        now,
-        0.0,
-        None,
-        None,
-        category,
-        type(error).__name__,
-        normalized_failure_signature(
-            exception_class=type(error).__name__, message=evidence, stage="checkout", exit_code=None
+        schema_version=RUN_RESULT_SCHEMA,
+        status="failed",
+        run_call_id=None,
+        attempt=spec.attempt,
+        git_commit=spec.git_commit,
+        operation=spec.operation,
+        sanitized_cli_args=command,
+        scientific_config_hash=None,
+        manifest_hashes={},
+        selection_lock_hash=None,
+        started_at=now,
+        ended_at=now,
+        duration_seconds=0.0,
+        modal_reference=None,
+        exit_code=exit_code,
+        failure_category=category,
+        exception_class=type(error).__name__,
+        failure_signature=normalized_failure_signature(
+            exception_class=type(error).__name__,
+            message=evidence,
+            stage=stage,
+            exit_code=exit_code,
         ),
-        "",
-        evidence,
-        None,
-        None,
-        None,
-        None,
-        False,
-        "stop_for_human_review",
+        stdout_tail=stdout_tail,
+        stderr_tail=stderr_tail,
+        full_log_artifact=None,
+        last_completed_checkpoint=None,
+        validation_result=None,
+        result_directory=None,
+        scientific_artifacts_written=False,
+        recommended_next_action=recommendation,
     )
 
 

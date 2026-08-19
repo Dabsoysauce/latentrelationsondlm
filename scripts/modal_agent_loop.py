@@ -276,6 +276,17 @@ def notification_payload(
     }
 
 
+def repair_patch_outcome(patch: bytes) -> Decision:
+    """Route an empty Codex patch to human review without invoking git apply."""
+    if not patch.strip():
+        return Decision(
+            "human_review_required",
+            "No repair proposed; human review required.",
+            True,
+        )
+    return Decision("validate_repair", "Codex proposed a nonempty patch.", False)
+
+
 def infrastructure_failure_result(spec: RunSpec, *, exit_code: int, message: str) -> RunResult:
     """Convert a Modal client/submission failure into the same strict result schema."""
     now = datetime.now(timezone.utc).isoformat()
@@ -555,6 +566,8 @@ def build_parser() -> argparse.ArgumentParser:
     infrastructure.add_argument("--spec", required=True)
     infrastructure.add_argument("--exit-code", required=True, type=int)
     infrastructure.add_argument("--message", required=True)
+    patch = commands.add_parser("patch-outcome")
+    patch.add_argument("--patch", required=True, type=Path)
     return parser
 
 
@@ -593,6 +606,9 @@ def main(argv: list[str] | None = None) -> int:
                     failed_spec, exit_code=args.exit_code, message=args.message
                 ).to_json()
             )
+            return 0
+        if args.command == "patch-outcome":
+            print(json.dumps(repair_patch_outcome(args.patch.read_bytes()).to_dict(), sort_keys=True))
             return 0
     except (OSError, ValueError, SpecError, subprocess.CalledProcessError) as error:
         print(f"modal-agent-loop: error: {redact_secrets(str(error))}", file=sys.stderr)
