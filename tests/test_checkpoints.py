@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -321,6 +322,68 @@ def test_incomplete_temporary_and_corrupt_final_chunks_are_recomputed(tmp_path):
     third = SentenceCheckpointStore(run).run(examples, identity, compute)
     assert calls == [0]
     pd.testing.assert_frame_equal(first, third)
+
+
+def test_checkpoint_rejects_rows_outside_the_input_sentence_range(tmp_path):
+    run = tmp_path / "run"
+    initialize_run(run, _config(), "initial", {"select": "hash"})
+    examples = _examples(10)
+
+    def wrong_rows(_chunk, _start):
+        frame = _rows(examples, 0).iloc[:1].copy()
+        frame["sentence_id"] = "not-in-this-chunk"
+        return frame
+
+    with pytest.raises(ArtifactError, match="outside its sentence range"):
+        SentenceCheckpointStore(run).run(examples, _identity(), wrong_rows)
+
+
+def test_cached_chunk_with_wrong_sentence_range_is_recomputed(tmp_path):
+    run = tmp_path / "run"
+    initialize_run(run, _config(), "initial", {"select": "hash"})
+    examples = _examples(10)
+    store = SentenceCheckpointStore(run)
+    store.run(examples, _identity(), _rows)
+    path = run / "checkpoints" / _identity().filename(0, 10)
+    frame = pd.read_parquet(path)
+    frame.loc[0, "sentence_id"] = "foreign-sentence"
+    frame.to_parquet(path, index=False)
+    metadata_path = path.with_suffix(".meta.json")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["parquet_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    atomic_json(metadata_path, metadata)
+    calls = []
+
+    def recompute(chunk, start):
+        calls.append(start)
+        return _rows(chunk, start)
+
+    restored = SentenceCheckpointStore(run).run(examples, _identity(), recompute)
+
+    assert calls == [0]
+    assert set(restored["sentence_id"]) == {example.sentence_id for example in examples}
+
+
+def test_legacy_checkpoint_with_foreign_sentence_is_not_reused(tmp_path):
+    run = tmp_path / "run"
+    initialize_run(run, _config(), "initial", {"select": "hash"})
+    examples = _examples(4)
+    legacy = run / "checkpoints" / "legacy.parquet"
+    wrong = _rows(examples, 0)
+    wrong.loc[0, "sentence_id"] = "foreign-sentence"
+    atomic_parquet(legacy, wrong)
+    calls = []
+
+    def recompute(chunk, start):
+        calls.append(start)
+        return _rows(chunk, start)
+
+    restored = SentenceCheckpointStore(run).run(
+        examples, _identity(), recompute, legacy_path=legacy
+    )
+
+    assert calls == [0]
+    assert "foreign-sentence" not in set(restored["sentence_id"])
 
 
 def test_resumed_and_uninterrupted_final_outputs_are_identical(tmp_path):

@@ -59,4 +59,5 @@ docs/         Protocol, running instructions, and verified status
 
 - [Frozen protocol](docs/PROTOCOL.md)
 - [How to run the GPU experiments](docs/RUNNING.md)
+- [Guarded Modal execution and repair workflow](docs/MODAL.md)
 - [Implementation and preliminary-result status](docs/STATUS.md)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -84,7 +85,10 @@ def selection_aware_permutation(
     }
     checkpoint = Path(checkpoint_path) if checkpoint_path is not None else None
     completed, null_statistics, selected_heads = _initial_progress(
-        checkpoint, identity, resume=resume
+        checkpoint,
+        identity,
+        resume=resume,
+        valid_heads=set(encoded["select"].heads),
     )
     start = len(completed)
     stop = n_permutations
@@ -374,9 +378,16 @@ def _array_hash(value: np.ndarray) -> str:
 
 
 def _initial_progress(
-    checkpoint: Path | None, identity: dict[str, Any], *, resume: bool
+    checkpoint: Path | None,
+    identity: dict[str, Any],
+    *,
+    resume: bool,
+    valid_heads: set[tuple[int, int]],
 ) -> tuple[list[int], list[float], list[list[int]]]:
-    if checkpoint is None or not checkpoint.exists():
+    if checkpoint is None:
+        return [], [], []
+    checkpoint.with_suffix(checkpoint.suffix + ".tmp").unlink(missing_ok=True)
+    if not checkpoint.exists():
         return [], [], []
     if not resume:
         raise ArtifactError(f"permutation checkpoint already exists; use resume: {checkpoint}")
@@ -387,13 +398,27 @@ def _initial_progress(
     for key, value in identity.items():
         if saved.get(key) != value:
             raise ArtifactError(f"permutation checkpoint scientific identity differs at {key}")
-    completed = [int(index) for index in saved.get("completed_permutation_indices", [])]
-    statistics = [float(value) for value in saved.get("null_statistics", [])]
-    heads = [[int(value) for value in head] for head in saved.get("selected_heads", [])]
+    try:
+        completed = [int(index) for index in saved.get("completed_permutation_indices", [])]
+        statistics = [float(value) for value in saved.get("null_statistics", [])]
+        heads = [[int(value) for value in head] for head in saved.get("selected_heads", [])]
+    except (TypeError, ValueError) as exc:
+        raise ArtifactError("permutation checkpoint progress has invalid value types") from exc
     if completed != list(range(len(completed))) or not (
         len(completed) == len(statistics) == len(heads)
     ):
         raise ArtifactError("permutation checkpoint progress is not contiguous and consistent")
+    if len(completed) > int(identity["n_permutations"]):
+        raise ArtifactError("permutation checkpoint exceeds the configured permutation count")
+    if any(not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in statistics):
+        raise ArtifactError("permutation checkpoint contains an invalid null statistic")
+    if any(len(head) != 2 or tuple(head) not in valid_heads for head in heads):
+        raise ArtifactError("permutation checkpoint contains an invalid selected head")
+    expected_status = (
+        "complete" if len(completed) == identity["n_permutations"] else "incomplete"
+    )
+    if saved.get("completion_status") != expected_status:
+        raise ArtifactError("permutation checkpoint completion status is inconsistent")
     return completed, statistics, heads
 
 

@@ -36,3 +36,24 @@ def test_official_boundaries_determinism_deduplication():
 def test_instance_intersection_not_sentence_intersection():
     sets = {"a": {"s1:i1", "s1:i2"}, "b": {"s1:i2", "s2:i1"}}
     assert common_valid_instances(sets) == {"s1:i2"}
+
+
+def test_budget_is_applied_after_deduplication_and_minimum_word_filter():
+    dataset = DatasetConfig(revision="abc", n_select=2, n_dev=0, n_test=0, min_words=4)
+    sentences = {
+        "train": [
+            Sentence("too-short", "only three words", words=3),
+            Sentence("first", "duplicate sentence has words"),
+            Sentence("duplicate", "duplicate sentence has words"),
+            Sentence("second", "second unique sentence here"),
+            Sentence("third", "third unique sentence here"),
+        ],
+        "dev": [],
+        "test": [],
+    }
+
+    selected = build_official_manifests(dataset, sentences)["select"]
+
+    assert len(selected) == 2
+    assert len({row.text_sha256 for row in selected}) == 2
+    assert all(row.n_words >= 4 for row in selected)

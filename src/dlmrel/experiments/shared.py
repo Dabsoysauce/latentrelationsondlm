@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..artifacts import ArtifactError, write_shard
+from ..artifacts import ArtifactError, dataframe_records, write_shard
 from ..checkpoints import CheckpointIdentity, SentenceCheckpointStore
 from ..config import RunConfig
 from ..controls import matched_word, receiver_controls
@@ -68,7 +68,9 @@ def score_attention_heads(
                 and max(example.word_to_tokens[word]) < len(state.is_visible)
             ]
             if instance.receiver_word_idx not in candidate_words:
-                continue
+                raise ArtifactError(
+                    f"gold receiver is not a valid aligned candidate: {instance.instance_id}"
+                )
             candidate_spans = [example.word_to_tokens[word] for word in candidate_words]
             gold_index = candidate_words.index(instance.receiver_word_idx)
             visibility = endpoint_visibility(state.is_visible, instance.attender_span, instance.receiver_span)
@@ -320,4 +322,8 @@ def write_frames(run_dir: Path, *, raw: pd.DataFrame, exclusions: pd.DataFrame) 
         exclusions = pd.DataFrame(columns=["sentence_id", "instance_id", "role", "reason"])
     exclusions.to_parquet(run_dir / "exclusions.parquet", index=False)
     for shard_id, start in enumerate(range(0, len(raw), 10_000)):
-        write_shard(run_dir, shard_id, raw.iloc[start : start + 10_000].to_dict("records"))
+        write_shard(
+            run_dir,
+            shard_id,
+            dataframe_records(raw.iloc[start : start + 10_000]),
+        )

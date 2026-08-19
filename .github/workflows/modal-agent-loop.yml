@@ -1,0 +1,643 @@
+name: Guarded Modal DLM run
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_commit:
+        description: Full immutable commit SHA to run
+        required: true
+        type: string
+      operation:
+        description: Allowlisted dlmrel operation
+        required: true
+        type: choice
+        options: [cpu-test, model-smoke-test, experiment-run, missing-test-grid-recovery, cpu-finalization, validation]
+      model:
+        description: Active model config
+        required: true
+        type: choice
+        options: [dream_7b, diffullama_7b, fake, none]
+      dataset:
+        description: Active dataset config
+        required: true
+        type: choice
+        options: [ewt, de_gsd, ja_gsd, none]
+      experiment:
+        description: Active experiment config
+        required: true
+        type: choice
+        options: [head_search, time_curve, attention_entropy, logit_lens, pos_probe, external_transfer, none]
+      track:
+        description: Frozen track
+        required: true
+        type: choice
+        options: [confirmatory_ewt, external_treebank_transfer, exploratory_extensions]
+      run_id:
+        description: Immutable safe run ID
+        required: true
+        type: string
+      selection_lock_source:
+        description: Relative path to an isolated copied relation lock, if required
+        required: false
+        type: string
+      source_result_identity:
+        description: Relative path to an isolated copied run for resume/recovery
+        required: false
+        type: string
+      expected_scientific_config_hash:
+        description: Required for resume/recovery
+        required: false
+        type: string
+      expected_manifest_hashes:
+        description: JSON object required for resume/recovery
+        required: false
+        default: "{}"
+        type: string
+      resource_profile:
+        description: Bounded profile; use cpu-small for every dry run
+        required: true
+        type: choice
+        options: [cpu-small, cpu-large, dream-a100-80gb, diffullama-a100-80gb]
+      timeout_seconds:
+        description: Must remain under the selected profile ceiling
+        required: true
+        default: "7200"
+        type: string
+      max_estimated_cost_usd:
+        description: Fail-closed estimated cost ceiling
+        required: true
+        default: "20"
+        type: string
+      maximum_attempts:
+        description: Maximum Codex repair attempts
+        required: true
+        default: "3"
+        type: choice
+        options: ["1", "2", "3"]
+      mode:
+        description: Supervised stops before a repaired rerun
+        required: true
+        default: supervised
+        type: choice
+        options: [supervised, guarded-auto]
+      resume:
+        description: Resume compatible existing checkpoints
+        required: true
+        default: false
+        type: boolean
+      dry_run:
+        description: Local fixture simulation only; no Modal call
+        required: true
+        default: true
+        type: boolean
+      attempt:
+        description: Internal bounded attempt number; leave at 1 for manual dispatch
+        required: true
+        default: "1"
+        type: string
+      failure_history:
+        description: Internal JSON failure signatures; leave empty for manual dispatch
+        required: false
+        default: "[]"
+        type: string
+      infrastructure_retries:
+        description: Internal infrastructure retry count; leave at 0 for manual dispatch
+        required: true
+        default: "0"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dlmrel-modal-${{ inputs.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  run-modal:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      action: ${{ steps.decision.outputs.action }}
+      failure_signature: ${{ steps.decision.outputs.failure_signature }}
+      result_directory: ${{ steps.decision.outputs.result_directory }}
+      git_commit: ${{ inputs.git_commit }}
+    steps:
+      - name: Check out the immutable workflow/controller commit without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install pinned Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install the pinned operational client
+        run: python -m pip install --requirement requirements/modal.txt
+
+      - name: Record frozen config bytes
+        run: python -m scripts.modal_agent_loop config-hashes > config-hashes.json
+
+      - name: Build and validate RunSpec
+        id: spec
+        env:
+          GIT_COMMIT_INPUT: ${{ inputs.git_commit }}
+          OPERATION_INPUT: ${{ inputs.operation }}
+          MODEL_INPUT: ${{ inputs.model }}
+          DATASET_INPUT: ${{ inputs.dataset }}
+          EXPERIMENT_INPUT: ${{ inputs.experiment }}
+          TRACK_INPUT: ${{ inputs.track }}
+          RUN_ID_INPUT: ${{ inputs.run_id }}
+          LOCK_INPUT: ${{ inputs.selection_lock_source }}
+          SOURCE_INPUT: ${{ inputs.source_result_identity }}
+          SCIENCE_HASH_INPUT: ${{ inputs.expected_scientific_config_hash }}
+          MANIFEST_HASHES_INPUT: ${{ inputs.expected_manifest_hashes }}
+          PROFILE_INPUT: ${{ inputs.resource_profile }}
+          TIMEOUT_INPUT: ${{ inputs.timeout_seconds }}
+          COST_INPUT: ${{ inputs.max_estimated_cost_usd }}
+          MAX_ATTEMPTS_INPUT: ${{ inputs.maximum_attempts }}
+          ATTEMPT_INPUT: ${{ inputs.attempt }}
+          RESUME_INPUT: ${{ inputs.resume }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          flags=()
+          if [ "$RESUME_INPUT" = "true" ]; then flags+=(--resume); fi
+          if [ "$DRY_RUN_INPUT" = "true" ]; then flags+=(--dry-run); fi
+          python -m scripts.modal_agent_loop build-spec \
+            --git-commit "$GIT_COMMIT_INPUT" \
+            --operation "$OPERATION_INPUT" \
+            --model "$MODEL_INPUT" \
+            --dataset "$DATASET_INPUT" \
+            --experiment "$EXPERIMENT_INPUT" \
+            --track "$TRACK_INPUT" \
+            --run-id "$RUN_ID_INPUT" \
+            --result-namespace scratch \
+            --selection-lock-source "$LOCK_INPUT" \
+            --source-result-identity "$SOURCE_INPUT" \
+            --expected-scientific-config-hash "$SCIENCE_HASH_INPUT" \
+            --expected-manifest-hashes "$MANIFEST_HASHES_INPUT" \
+            --resource-profile "$PROFILE_INPUT" \
+            --timeout-seconds "$TIMEOUT_INPUT" \
+            --max-estimated-cost-usd "$COST_INPUT" \
+            --maximum-repair-attempts "$MAX_ATTEMPTS_INPUT" \
+            --attempt "$ATTEMPT_INPUT" \
+            "${flags[@]}" > run-spec.json
+
+      - name: Credential-free local dry run
+        if: ${{ inputs.dry_run }}
+        run: |
+          python -m scripts.modal_agent_loop dry-run | tee local-dry-run.txt
+          cp tests/fixtures/modal_loop_results.json modal-result.json
+
+      - name: Submit one ephemeral Modal call
+        if: ${{ !inputs.dry_run }}
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          spec_json="$(tr -d '\n' < run-spec.json)"
+          set +e
+          modal run --quiet --write-result modal-result.json -m runners.modal_app \
+            --spec-json "$spec_json"
+          modal_exit="$?"
+          set -e
+          if [ ! -s modal-result.json ]; then
+            python -m scripts.modal_agent_loop infrastructure-result \
+              --spec run-spec.json \
+              --exit-code "$modal_exit" \
+              --message "Modal client submission failed; inspect the sanitized workflow log" \
+              > modal-result.json
+          fi
+
+      - name: Decide bounded next action
+        id: decision
+        env:
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          MODE_INPUT: ${{ inputs.mode }}
+          PARENT_COMMIT_INPUT: ${{ inputs.git_commit }}
+          ATTEMPT_INPUT: ${{ inputs.attempt }}
+          INFRA_RETRIES_INPUT: ${{ inputs.infrastructure_retries }}
+          FAILURE_HISTORY_INPUT: ${{ inputs.failure_history }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN_INPUT" = "true" ]; then
+            echo "action=success" >> "$GITHUB_OUTPUT"
+            echo "failure_signature=" >> "$GITHUB_OUTPUT"
+            echo "result_directory=" >> "$GITHUB_OUTPUT"
+            echo "## Local dry run passed (no external services contacted)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          jq -n \
+            --arg parent "$PARENT_COMMIT_INPUT" \
+            --arg current "$PARENT_COMMIT_INPUT" \
+            --argjson repairs "$((ATTEMPT_INPUT - 1))" \
+            --argjson history "$FAILURE_HISTORY_INPUT" \
+            --argjson infra "$INFRA_RETRIES_INPUT" \
+            '{parent_commit:$parent,current_commit:$current,agent_repairs:$repairs,infrastructure_retries:$infra,no_op_repairs:0,failure_signatures:$history}' \
+            > loop-state.json
+          python -m scripts.modal_agent_loop decide \
+            --state loop-state.json --result modal-result.json --mode "$MODE_INPUT" > decision.json
+          echo "action=$(jq -r .action decision.json)" >> "$GITHUB_OUTPUT"
+          echo "failure_signature=$(jq -r '.failure_signature // empty' modal-result.json)" >> "$GITHUB_OUTPUT"
+          echo "result_directory=$(jq -r '.result_directory // empty' modal-result.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Modal attempt $ATTEMPT_INPUT"
+            echo '```json'
+            jq '{status,attempt,git_commit,operation,failure_category,failure_signature,modal_reference,last_completed_checkpoint,recommended_next_action}' modal-result.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sanitized attempt evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: modal-attempt-${{ inputs.run_id }}-${{ inputs.attempt }}
+          path: |
+            run-spec.json
+            modal-result.json
+            config-hashes.json
+            decision.json
+            local-dry-run.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+  retry-infrastructure:
+    needs: run-modal
+    if: ${{ needs.run-modal.outputs.action == 'infrastructure_retry' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Queue the same immutable job with no code changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_COMMIT_INPUT: ${{ inputs.git_commit }}
+          OPERATION_INPUT: ${{ inputs.operation }}
+          MODEL_INPUT: ${{ inputs.model }}
+          DATASET_INPUT: ${{ inputs.dataset }}
+          EXPERIMENT_INPUT: ${{ inputs.experiment }}
+          TRACK_INPUT: ${{ inputs.track }}
+          RUN_ID_INPUT: ${{ inputs.run_id }}
+          LOCK_INPUT: ${{ inputs.selection_lock_source }}
+          SOURCE_INPUT: ${{ inputs.source_result_identity }}
+          SCIENCE_HASH_INPUT: ${{ inputs.expected_scientific_config_hash }}
+          MANIFEST_HASHES_INPUT: ${{ inputs.expected_manifest_hashes }}
+          PROFILE_INPUT: ${{ inputs.resource_profile }}
+          TIMEOUT_INPUT: ${{ inputs.timeout_seconds }}
+          COST_INPUT: ${{ inputs.max_estimated_cost_usd }}
+          MAX_ATTEMPTS_INPUT: ${{ inputs.maximum_attempts }}
+          MODE_INPUT: ${{ inputs.mode }}
+          RESUME_INPUT: ${{ inputs.resume }}
+          ATTEMPT_INPUT: ${{ inputs.attempt }}
+          FAILURE_HISTORY_INPUT: ${{ inputs.failure_history }}
+          INFRA_RETRIES_INPUT: ${{ inputs.infrastructure_retries }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          next_retry="$((INFRA_RETRIES_INPUT + 1))"
+          gh workflow run modal-agent-loop.yml \
+            -f git_commit="$GIT_COMMIT_INPUT" \
+            -f operation="$OPERATION_INPUT" \
+            -f model="$MODEL_INPUT" \
+            -f dataset="$DATASET_INPUT" \
+            -f experiment="$EXPERIMENT_INPUT" \
+            -f track="$TRACK_INPUT" \
+            -f run_id="$RUN_ID_INPUT" \
+            -f selection_lock_source="$LOCK_INPUT" \
+            -f source_result_identity="$SOURCE_INPUT" \
+            -f expected_scientific_config_hash="$SCIENCE_HASH_INPUT" \
+            -f expected_manifest_hashes="$MANIFEST_HASHES_INPUT" \
+            -f resource_profile="$PROFILE_INPUT" \
+            -f timeout_seconds="$TIMEOUT_INPUT" \
+            -f max_estimated_cost_usd="$COST_INPUT" \
+            -f maximum_attempts="$MAX_ATTEMPTS_INPUT" \
+            -f mode="$MODE_INPUT" \
+            -f resume="$RESUME_INPUT" \
+            -f dry_run=false \
+            -f attempt="$ATTEMPT_INPUT" \
+            -f failure_history="$FAILURE_HISTORY_INPUT" \
+            -f infrastructure_retries="$next_retry"
+
+  codex-repair:
+    needs: run-modal
+    if: ${{ needs.run-modal.outputs.action == 'prepare_repair' || needs.run-modal.outputs.action == 'repair_and_rerun' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the immutable trusted controller and prompt
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted-controller
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out the exact failing commit into an isolated worktree
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.run-modal.outputs.git_commit }}
+          path: repair-worktree
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install dependencies before exposing the OpenAI key
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install repository CPU dependencies
+        run: python -m pip install -e "./repair-worktree[dev]"
+
+      - name: Download sanitized failure evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: modal-attempt-${{ inputs.run_id }}-${{ inputs.attempt }}
+          path: evidence
+
+      - name: Render fixed repair prompt
+        env:
+          PYTHONPATH: ${{ github.workspace }}/trusted-controller
+        run: |
+          python -m scripts.modal_agent_loop render-prompt \
+            --template trusted-controller/prompts/modal_repair.md \
+            --spec evidence/run-spec.json \
+            --result evidence/modal-result.json \
+            --output repair-prompt.md
+
+      - name: Run bounded Codex repair without push or Modal credentials
+        id: codex
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1.11 dereferenced commit
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: repair-prompt.md
+          output-file: ${{ github.workspace }}/codex-final.txt
+          working-directory: repair-worktree
+          permission-profile: ":workspace"
+          codex-version: "0.146.0"
+          safety-strategy: drop-sudo
+
+      - name: Package the untrusted patch for a secret-free validation job
+        run: |
+          git -C repair-worktree add --all
+          git -C repair-worktree diff --binary --cached --no-ext-diff > repair.patch
+
+      - name: Upload untrusted repair patch
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: codex-patch-${{ inputs.run_id }}-${{ inputs.attempt }}
+          path: |
+            repair.patch
+            codex-final.txt
+          retention-days: 14
+
+  validate-repair:
+    needs: [run-modal, codex-repair]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the immutable trusted policy checker
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted-controller
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out the exact failing commit into an isolated worktree
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.run-modal.outputs.git_commit }}
+          path: repair-worktree
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install CPU dependencies with no secrets present
+        run: python -m pip install -e "./repair-worktree[dev]"
+
+      - name: Download baseline evidence and untrusted patch
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: "*-${{ inputs.run_id }}-${{ inputs.attempt }}"
+          path: evidence
+          merge-multiple: true
+
+      - name: Apply and inspect the patch before running repository code
+        env:
+          BASE_COMMIT: ${{ needs.run-modal.outputs.git_commit }}
+          PYTHONPATH: ${{ github.workspace }}/trusted-controller
+        run: |
+          git -C repair-worktree apply --index --whitespace=error ../evidence/repair.patch
+          python -m scripts.modal_agent_loop policy-check \
+            --root repair-worktree \
+            --base-commit "$BASE_COMMIT" \
+            --expected-config-hashes evidence/config-hashes.json > policy-report.json
+
+      - name: Run all CPU verification
+        working-directory: repair-worktree
+        run: |
+          python -m pytest -q
+          ruff check .
+          python -m compileall -q src tests runners scripts
+          python -m pip check
+
+      - name: Recheck policy after tests
+        env:
+          BASE_COMMIT: ${{ needs.run-modal.outputs.git_commit }}
+          PYTHONPATH: ${{ github.workspace }}/trusted-controller
+        run: |
+          python -m scripts.modal_agent_loop policy-check \
+            --root repair-worktree \
+            --base-commit "$BASE_COMMIT" \
+            --expected-config-hashes evidence/config-hashes.json > policy-report.json
+          git -C repair-worktree diff --binary --cached --no-ext-diff \
+            "$BASE_COMMIT" -- > validated-repair.patch
+
+      - name: Upload validated patch only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: validated-patch-${{ inputs.run_id }}-${{ inputs.attempt }}
+          path: |
+            validated-repair.patch
+            policy-report.json
+          retention-days: 14
+
+  publish-draft:
+    needs: [run-modal, validate-repair]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    outputs:
+      repaired_commit: ${{ steps.commit.outputs.repaired_commit }}
+    steps:
+      - name: Trusted checkout with no persisted credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.run-modal.outputs.git_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download the validated patch
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: validated-patch-${{ inputs.run_id }}-${{ inputs.attempt }}
+          path: evidence
+
+      - name: Download sanitized attempt evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: modal-attempt-${{ inputs.run_id }}-${{ inputs.attempt }}
+          path: attempt-evidence
+
+      - name: Trusted commit and push
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID_INPUT: ${{ inputs.run_id }}
+          ATTEMPT_INPUT: ${{ inputs.attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --index --whitespace=error evidence/validated-repair.patch
+          branch="automation/modal-repair/${RUN_ID_INPUT}"
+          git switch -C "$branch"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -c core.hooksPath=/dev/null commit -m "fix: guarded Modal repair attempt ${ATTEMPT_INPUT}"
+          repaired_commit="$(git rev-parse HEAD)"
+          gh auth setup-git
+          git push --force-with-lease origin "$branch"
+          echo "repaired_commit=$repaired_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update one draft PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID_INPUT: ${{ inputs.run_id }}
+          ATTEMPT_INPUT: ${{ inputs.attempt }}
+          ATTEMPT_HISTORY: ${{ inputs.failure_history }}
+          FAILURE_SIGNATURE: ${{ needs.run-modal.outputs.failure_signature }}
+          REPAIRED_COMMIT: ${{ steps.commit.outputs.repaired_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="automation/modal-repair/${RUN_ID_INPUT}"
+          failure_category="$(jq -r '.failure_category // "none"' attempt-evidence/modal-result.json)"
+          modal_reference="$(jq -r '.modal_reference // "unavailable"' attempt-evidence/modal-result.json)"
+          checkpoint="$(jq -r '.last_completed_checkpoint // "none"' attempt-evidence/modal-result.json)"
+          scientific_hash="$(jq -r '.scientific_config_hash // "not yet written"' attempt-evidence/modal-result.json)"
+          printf '%s\n' \
+            "## Guarded Modal repair" \
+            "- Run: ${RUN_ID_INPUT}" \
+            "- Repair attempt: ${ATTEMPT_INPUT}" \
+            "- Tested commit: ${REPAIRED_COMMIT}" \
+            "- Failure category: ${failure_category}" \
+            "- Failure signature: ${FAILURE_SIGNATURE}" \
+            "- Prior failure signatures: ${ATTEMPT_HISTORY}" \
+            "- Modal call: ${modal_reference}" \
+            "- Last checkpoint: ${checkpoint}" \
+            "- Scientific hash observed: ${scientific_hash}" \
+            "- Scientific config bytes changed: no" \
+            "- Full CPU tests, Ruff, compileall, and pip check: passed" \
+            "- Remaining uncertainty: GPU behavior is not proven until the exact repaired commit reruns." \
+            "- Manual next action: review this diff; approve a supervised Modal rerun if acceptable." \
+            "" \
+            "### Changed files" > pr-body.md
+          git show --format= --name-only HEAD >> pr-body.md
+          if gh pr view "$branch" --json number >/dev/null 2>&1; then
+            gh pr edit "$branch" --body-file pr-body.md
+          else
+            gh pr create --draft --base main --head "$branch" \
+              --title "Guarded Modal repair: ${RUN_ID_INPUT}" --body-file pr-body.md
+          fi
+
+      - name: Queue the next guarded-auto attempt after this run releases concurrency
+        if: ${{ inputs.mode == 'guarded-auto' && fromJSON(inputs.attempt) <= fromJSON(inputs.maximum_attempts) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPAIRED_COMMIT: ${{ steps.commit.outputs.repaired_commit }}
+          FAILURE_SIGNATURE: ${{ needs.run-modal.outputs.failure_signature }}
+          PREVIOUS_RESULT: ${{ needs.run-modal.outputs.result_directory }}
+          CURRENT_HISTORY: ${{ inputs.failure_history }}
+          CURRENT_ATTEMPT: ${{ inputs.attempt }}
+          OPERATION_INPUT: ${{ inputs.operation }}
+          MODEL_INPUT: ${{ inputs.model }}
+          DATASET_INPUT: ${{ inputs.dataset }}
+          EXPERIMENT_INPUT: ${{ inputs.experiment }}
+          TRACK_INPUT: ${{ inputs.track }}
+          RUN_ID_INPUT: ${{ inputs.run_id }}
+          LOCK_INPUT: ${{ inputs.selection_lock_source }}
+          SCIENCE_HASH_INPUT: ${{ inputs.expected_scientific_config_hash }}
+          MANIFEST_HASHES_INPUT: ${{ inputs.expected_manifest_hashes }}
+          PROFILE_INPUT: ${{ inputs.resource_profile }}
+          TIMEOUT_INPUT: ${{ inputs.timeout_seconds }}
+          COST_INPUT: ${{ inputs.max_estimated_cost_usd }}
+          MAX_ATTEMPTS_INPUT: ${{ inputs.maximum_attempts }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          next_attempt="$((CURRENT_ATTEMPT + 1))"
+          next_history="$(jq -cn --argjson old "$CURRENT_HISTORY" --arg sig "$FAILURE_SIGNATURE" '$old + [$sig]')"
+          gh workflow run modal-agent-loop.yml \
+            -f git_commit="$REPAIRED_COMMIT" \
+            -f operation="$OPERATION_INPUT" \
+            -f model="$MODEL_INPUT" \
+            -f dataset="$DATASET_INPUT" \
+            -f experiment="$EXPERIMENT_INPUT" \
+            -f track="$TRACK_INPUT" \
+            -f run_id="$RUN_ID_INPUT" \
+            -f selection_lock_source="$LOCK_INPUT" \
+            -f source_result_identity="$PREVIOUS_RESULT" \
+            -f expected_scientific_config_hash="$SCIENCE_HASH_INPUT" \
+            -f expected_manifest_hashes="$MANIFEST_HASHES_INPUT" \
+            -f resource_profile="$PROFILE_INPUT" \
+            -f timeout_seconds="$TIMEOUT_INPUT" \
+            -f max_estimated_cost_usd="$COST_INPUT" \
+            -f maximum_attempts="$MAX_ATTEMPTS_INPUT" \
+            -f mode=guarded-auto \
+            -f resume=true \
+            -f dry_run=false \
+            -f attempt="$next_attempt" \
+            -f failure_history="$next_history" \
+            -f infrastructure_retries=0
+
+  terminal-summary:
+    needs: [run-modal, publish-draft]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Write terminal summary without secret-bearing logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID_INPUT: ${{ inputs.run_id }}
+          ACTION_OUTPUT: ${{ needs.run-modal.outputs.action }}
+        shell: bash
+        run: |
+          {
+            echo "## Guarded DLM controller"
+            echo "- Run ID: $RUN_ID_INPUT"
+            echo "- Decision: $ACTION_OUTPUT"
+            echo "- Scientific settings changed: no"
+            echo "- Automatic merge: never"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$ACTION_OUTPUT" = "success" ] && gh pr view "automation/modal-repair/${RUN_ID_INPUT}" --json number >/dev/null 2>&1; then
+            gh pr ready "automation/modal-repair/${RUN_ID_INPUT}"
+          fi

@@ -42,18 +42,24 @@ def test_pos_runner_evaluates_every_protocol_seed(tmp_path, monkeypatch):
     calls = []
 
     def fake_load(_cfg, _tokenizer, role):
+        calls.append(("load", role))
         return [role], pd.DataFrame()
 
     def fake_features(
         _model, _tokenizer, _examples, _cfg, *, seed, role, checkpoint_store
     ):
         assert checkpoint_store is not None
-        calls.append((seed, role))
+        calls.append(("features", seed, role))
         return seed
 
-    def fake_evaluate(collected, seed):
-        assert set(collected) == {"select", "dev", "test"}
-        assert set(collected.values()) == {seed}
+    def fake_fit(select, dev, seed):
+        assert select == dev == seed
+        calls.append(("fit", seed))
+        return seed
+
+    def fake_evaluate(fitted, test, seed):
+        assert fitted == test == seed
+        calls.append(("evaluate", seed))
         raw = pd.DataFrame({"seed": [seed], "sentence_id": [f"sentence-{seed}"]})
         metrics = {
             "seed": seed,
@@ -71,7 +77,8 @@ def test_pos_runner_evaluates_every_protocol_seed(tmp_path, monkeypatch):
 
     monkeypatch.setattr(pos_probe, "load_manifest_examples", fake_load)
     monkeypatch.setattr(pos_probe, "masked_features", fake_features)
-    monkeypatch.setattr(pos_probe, "evaluate_seed", fake_evaluate)
+    monkeypatch.setattr(pos_probe, "fit_probe", fake_fit)
+    monkeypatch.setattr(pos_probe, "evaluate_fitted_probe", fake_evaluate)
     monkeypatch.setattr(pos_probe, "write_frames", lambda *_args, **_kwargs: None)
     run = tmp_path / "run"
     initialize_run(run, {"runtime": {}}, "command", {"test": "hash"})
@@ -79,10 +86,24 @@ def test_pos_runner_evaluates_every_protocol_seed(tmp_path, monkeypatch):
 
     details = pos_probe.run(object(), object(), cfg, run)
 
-    assert calls == [
-        (seed, role)
+    test_load_index = calls.index(("load", "test"))
+    assert calls[:test_load_index] == [
+        ("load", "select"),
+        ("load", "dev"),
+        ("features", 42, "select"),
+        ("features", 42, "dev"),
+        ("fit", 42),
+        ("features", 43, "select"),
+        ("features", 43, "dev"),
+        ("fit", 43),
+        ("features", 44, "select"),
+        ("features", 44, "dev"),
+        ("fit", 44),
+    ]
+    assert calls[test_load_index + 1 :] == [
+        item
         for seed in (42, 43, 44)
-        for role in ("select", "dev", "test")
+        for item in (("features", seed, "test"), ("evaluate", seed))
     ]
     assert details["n_seeds"] == 3
     assert pd.read_csv(run / "per_seed_metrics.csv")["seed"].tolist() == [42, 43, 44]
@@ -129,3 +150,63 @@ def test_pos_features_round_trip_through_sentence_checkpoints(tmp_path, monkeypa
     assert calls == [("word 0", 42), ("word 1", 42)]
     for first_array, second_array in zip(first, second, strict=True):
         np.testing.assert_array_equal(first_array, second_array)
+
+
+def _features(values, labels, prefix):
+    values = np.asarray(values, dtype=float).reshape(-1, 1)
+    labels = np.asarray(labels)
+    groups = np.asarray([f"{prefix}-{index // 2}" for index in range(len(labels))])
+    forms = np.asarray([f"form-{index % 3}" for index in range(len(labels))])
+    word_indices = np.arange(len(labels))
+    return values, labels, groups, forms, word_indices
+
+
+def test_probe_scaler_and_c_use_select_and_dev_only_with_smallest_c_tie():
+    select = _features([-3, -2, -1, 1, 2, 3], ["N", "N", "N", "V", "V", "V"], "s")
+    dev = _features([-2.5, -0.5, 0.5, 2.5], ["N", "N", "V", "V"], "d")
+
+    fitted = pos_probe.fit_probe(select, dev, seed=42)
+
+    assert fitted.scaler.mean_[0] == pytest.approx(np.mean(select[0]))
+    assert fitted.selected_c == 0.01
+
+
+def test_probe_metrics_and_controls_are_reproducible_after_c_is_frozen():
+    select = _features([-3, -2, -1, 1, 2, 3], ["N", "N", "N", "V", "V", "V"], "s")
+    dev = _features([-2.5, -0.5, 0.5, 2.5], ["N", "N", "V", "V"], "d")
+    test = _features([-4, -0.25, 0.25, 4], ["N", "N", "V", "V"], "t")
+    fitted = pos_probe.fit_probe(select, dev, seed=43)
+
+    first_rows, first_metrics = pos_probe.evaluate_fitted_probe(fitted, test, seed=43)
+    second_rows, second_metrics = pos_probe.evaluate_fitted_probe(fitted, test, seed=43)
+
+    pd.testing.assert_frame_equal(first_rows, second_rows)
+    assert first_metrics == second_metrics
+    assert first_metrics["accuracy"] == 1.0
+    assert first_metrics["macro_f1"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "select,dev,error",
+    [
+        (
+            (
+                np.asarray([]),
+                np.asarray([]),
+                np.asarray([]),
+                np.asarray([]),
+                np.asarray([]),
+            ),
+            _features([0, 1], ["N", "V"], "d"),
+            "nonempty 2D matrix",
+        ),
+        (
+            _features([0, 1], ["N", "N"], "s"),
+            _features([0, 1], ["N", "V"], "d"),
+            "at least two classes",
+        ),
+    ],
+)
+def test_probe_invalid_tiny_or_single_class_splits_fail_usefully(select, dev, error):
+    with pytest.raises(ValueError, match=error):
+        pos_probe.fit_probe(select, dev, seed=42)
