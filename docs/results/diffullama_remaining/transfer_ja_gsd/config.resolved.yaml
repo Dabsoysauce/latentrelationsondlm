@@ -1,0 +1,68 @@
+schema_version: dlmrel-config-v2
+track: external_treebank_transfer
+model:
+  id: diffullama_7b
+  name: diffusionfamily/diffullama
+  family: diffullama
+  revision: 31b22850c7b397d6948ea04076099b9ff7110adc
+  tokenizer_revision: 31b22850c7b397d6948ea04076099b9ff7110adc
+  remote_code_revision: c17e897f6476c174b4623da594e4c65554f1613d
+  dtype: bfloat16
+  device: cuda
+  attn_implementation: eager
+  capabilities:
+    logits: true
+    hidden_states: true
+    attentions: true
+dataset:
+  id: ja_gsd
+  treebank: UD_Japanese-GSD
+  language: ja
+  release: '2.15'
+  repository: https://github.com/UniversalDependencies/UD_Japanese-GSD
+  revision: 8e5794fae6d25796437a64a08c497a5c870b7b09
+  checksums:
+    train: sha256:7a64ebfde23f48c334157682ad9bdbbd2d12b3a95d5976dff24788a38b90f734
+    dev: sha256:1d53dd829cbb5ee1604746b2b2cf282ecf0922e6028dc95f9d19b0634c9625e2
+    test: sha256:980d24fb9b245880454c088938b8417c13066b169b4f9246a060e2ef8be0c2ac
+  cache_dir: data/ud
+  select_from: train
+  dev_from: dev
+  test_from: test
+  n_select: null
+  n_dev: null
+  n_test: null
+  seed: 42
+  dedupe_normalized_text: true
+  min_words: 4
+  max_words: null
+experiment:
+  id: ewt_locked_transfer
+  type: head_search
+  steps: 64
+  normalized_progress:
+  - 0.0
+  - 0.125
+  - 0.25
+  - 0.375
+  - 0.5
+  - 0.625
+  - 0.75
+  - 0.875
+  - 1.0
+  seeds:
+  - 42
+  - 43
+  - 44
+  scoring:
+    attender_rows: mean
+    receiver_span: sum
+    top_k: 5
+    primary_relation: object_to_verb
+    primary_visibility: both_masked
+runtime:
+  results_root: results
+  run_id: diffullama-ja-transfer-v1
+  resume: false
+  dry_run: false
+  selection_lock: docs/results/diffullama_confirmatory/selection_lock.json
