@@ -280,6 +280,7 @@ jobs:
       - name: Queue the same immutable job with no code changes
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           GIT_COMMIT_INPUT: ${{ inputs.git_commit }}
           OPERATION_INPUT: ${{ inputs.operation }}
           MODEL_INPUT: ${{ inputs.model }}
@@ -333,6 +334,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      has_patch: ${{ steps.patch.outputs.has_patch }}
+      repair_outcome: ${{ steps.patch.outputs.repair_outcome }}
+      repair_reason: ${{ steps.patch.outputs.repair_reason }}
     steps:
       - name: Check out the immutable trusted controller and prompt
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -387,9 +392,24 @@ jobs:
           safety-strategy: drop-sudo
 
       - name: Package the untrusted patch for a secret-free validation job
+        id: patch
+        env:
+          PYTHONPATH: ${{ github.workspace }}/trusted-controller
         run: |
+          set -euo pipefail
           git -C repair-worktree add --all
           git -C repair-worktree diff --binary --cached --no-ext-diff > repair.patch
+          python -m scripts.modal_agent_loop patch-outcome \
+            --patch repair.patch > repair-outcome.json
+          repair_outcome="$(jq -r .action repair-outcome.json)"
+          repair_reason="$(jq -r .reason repair-outcome.json)"
+          if [ "$repair_outcome" = "validate_repair" ]; then
+            echo "has_patch=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_patch=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "repair_outcome=$repair_outcome" >> "$GITHUB_OUTPUT"
+          echo "repair_reason=$repair_reason" >> "$GITHUB_OUTPUT"
 
       - name: Upload untrusted repair patch
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -397,11 +417,13 @@ jobs:
           name: codex-patch-${{ inputs.run_id }}-${{ inputs.attempt }}
           path: |
             repair.patch
+            repair-outcome.json
             codex-final.txt
           retention-days: 14
 
   validate-repair:
     needs: [run-modal, codex-repair]
+    if: ${{ needs.codex-repair.outputs.has_patch == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -477,7 +499,8 @@ jobs:
           retention-days: 14
 
   publish-draft:
-    needs: [run-modal, validate-repair]
+    needs: [run-modal, codex-repair, validate-repair]
+    if: ${{ needs.codex-repair.outputs.has_patch == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -617,7 +640,7 @@ jobs:
             -f infrastructure_retries=0
 
   terminal-summary:
-    needs: [run-modal, publish-draft]
+    needs: [run-modal, codex-repair, publish-draft]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
@@ -627,14 +650,21 @@ jobs:
       - name: Write terminal summary without secret-bearing logs
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RUN_ID_INPUT: ${{ inputs.run_id }}
           ACTION_OUTPUT: ${{ needs.run-modal.outputs.action }}
+          REPAIR_OUTCOME: ${{ needs.codex-repair.outputs.repair_outcome }}
+          REPAIR_REASON: ${{ needs.codex-repair.outputs.repair_reason }}
         shell: bash
         run: |
           {
             echo "## Guarded DLM controller"
             echo "- Run ID: $RUN_ID_INPUT"
             echo "- Decision: $ACTION_OUTPUT"
+            if [ "$REPAIR_OUTCOME" = "human_review_required" ]; then
+              echo "- Repair outcome: $REPAIR_OUTCOME"
+              echo "- Reason: $REPAIR_REASON"
+            fi
             echo "- Scientific settings changed: no"
             echo "- Automatic merge: never"
           } >> "$GITHUB_STEP_SUMMARY"

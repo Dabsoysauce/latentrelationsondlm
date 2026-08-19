@@ -10,10 +10,13 @@ import pytest
 from runners.modal_app import (
     RUN_RESULT_SCHEMA,
     RUN_SPEC_SCHEMA,
+    CheckoutError,
     ProcessOutcome,
     RunResult,
     RunSpec,
     SpecError,
+    _failed_before_worker,
+    _run_git_checkout,
     _sanitized_environment,
     build_cli_args,
     classify_failure,
@@ -249,6 +252,69 @@ def test_secret_redaction_and_signature_are_stable_but_distinguish_failures():
 )
 def test_failure_classification(message, code, category):
     assert classify_failure(message, exit_code=code) == category
+
+
+def test_checkout_failure_captures_output_and_transient_network_error(monkeypatch):
+    captured = {}
+
+    def failed_run(command, **kwargs):
+        captured.update(kwargs)
+        return type(
+            "Completed",
+            (),
+            {
+                "returncode": 128,
+                "stdout": "Cloning into repository...\n",
+                "stderr": "fatal: Could not resolve host: github.com\n",
+            },
+        )()
+
+    monkeypatch.setattr("runners.modal_app.subprocess.run", failed_run)
+    with pytest.raises(CheckoutError) as raised:
+        _run_git_checkout(["git", "clone", "safe-url"], stage="clone")
+
+    error = raised.value
+    assert captured["capture_output"] is True
+    assert captured["check"] is False
+    assert captured["shell"] is False
+    result = _failed_before_worker(make_spec(), error)
+    assert result.failure_category == "transient_infrastructure"
+    assert result.exit_code == 128
+    assert "Could not resolve host" in result.stderr_tail
+    assert "Cloning into repository" in result.stdout_tail
+    assert result.recommended_next_action == "retry_same_commit_once"
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "remote: Repository not found.",
+        "fatal: Authentication failed",
+        "fatal: couldn't find remote ref deadbeef",
+        "fatal: reference is not a tree: deadbeef",
+    ],
+)
+def test_permanent_checkout_failure_stops_for_human_review(stderr):
+    error = CheckoutError(
+        stage="fetch",
+        command=["git", "fetch"],
+        returncode=128,
+        stdout="",
+        stderr=stderr,
+    )
+    result = _failed_before_worker(make_spec(), error)
+    assert result.failure_category != "transient_infrastructure"
+    assert result.failure_category == "unknown"
+    assert result.recommended_next_action == "stop_for_human_review"
+
+
+def test_invalid_checkout_identity_does_not_trigger_implementation_repair():
+    result = _failed_before_worker(
+        make_spec(),
+        SpecError("checked-out repository commit differs from RunSpec"),
+    )
+    assert result.failure_category == "unknown"
+    assert result.recommended_next_action == "stop_for_human_review"
 
 
 def test_subprocess_runner_always_uses_shell_false(monkeypatch, tmp_path):

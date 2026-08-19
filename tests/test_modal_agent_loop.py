@@ -18,6 +18,7 @@ from scripts.modal_agent_loop import (
     main,
     notification_payload,
     render_repair_prompt,
+    repair_patch_outcome,
     scientific_config_hashes,
 )
 
@@ -324,3 +325,33 @@ def test_manual_workflow_is_valid_pinned_and_has_credential_boundaries():
         "validate-repair:", 1
     )[0]
     assert "modal-client.log" not in text
+    retry_env = workflow["jobs"]["retry-infrastructure"]["steps"][0]["env"]
+    terminal_env = workflow["jobs"]["terminal-summary"]["steps"][0]["env"]
+    assert retry_env["GH_REPO"] == "${{ github.repository }}"
+    assert terminal_env["GH_REPO"] == "${{ github.repository }}"
+    assert (
+        workflow["jobs"]["validate-repair"]["if"]
+        == "${{ needs.codex-repair.outputs.has_patch == 'true' }}"
+    )
+    assert (
+        workflow["jobs"]["publish-draft"]["if"]
+        == "${{ needs.codex-repair.outputs.has_patch == 'true' }}"
+    )
+
+
+def test_empty_repair_patch_requires_human_review_without_validation(tmp_path, capsys):
+    empty = tmp_path / "repair.patch"
+    empty.write_bytes(b"")
+
+    decision = repair_patch_outcome(empty.read_bytes())
+    assert decision.action == "human_review_required"
+    assert decision.reason == "No repair proposed; human review required."
+    assert decision.terminal
+
+    assert main(["patch-outcome", "--patch", str(empty)]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["action"] == "human_review_required"
+    assert output["reason"] == "No repair proposed; human review required."
+
+    proposed = repair_patch_outcome(b"diff --git a/file b/file\n")
+    assert proposed.action == "validate_repair"
