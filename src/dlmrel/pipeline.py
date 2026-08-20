@@ -15,6 +15,134 @@ from .artifacts import ArtifactError, atomic_json, final_artifact_hashes
 from .config import RunConfig
 from .relation_selection import RelationLockSet, load_relation_locks
 
+ATTENTION_ROW_SUM_TOLERANCE = 1e-3
+_WORST_ROWS_PER_LAYER = 1
+_WORST_ROWS_OVERALL = 5
+
+
+def _unravel_index(index: int, shape: tuple[int, ...]) -> list[int]:
+    coordinates: list[int] = []
+    for size in reversed(shape):
+        coordinates.append(index % size)
+        index //= size
+    return list(reversed(coordinates))
+
+
+def _worst_attention_rows(
+    row_sums: torch.Tensor,
+    *,
+    layer_index: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    flat_sums = row_sums.reshape(-1)
+    flat_errors = (flat_sums - 1.0).abs()
+    ranking_errors = torch.where(
+        torch.isfinite(flat_errors),
+        flat_errors,
+        torch.full_like(flat_errors, torch.inf),
+    )
+    count = min(limit, flat_sums.numel())
+    if count == 0:
+        return []
+    _, indices = torch.topk(ranking_errors, count, largest=True, sorted=True)
+    rows = []
+    for flat_index in indices.tolist():
+        row_sum = flat_sums[flat_index].item()
+        error = flat_errors[flat_index].item()
+        rows.append(
+            {
+                "layer": layer_index,
+                "row_index": _unravel_index(flat_index, tuple(row_sums.shape)),
+                "row_sum": row_sum if torch.isfinite(flat_sums[flat_index]).item() else None,
+                "abs_error_from_one": error if torch.isfinite(flat_errors[flat_index]).item() else None,
+            }
+        )
+    return rows
+
+
+def attention_normalization_diagnostics(
+    attentions,
+    *,
+    sequence_length: int,
+    tolerance: float = ATTENTION_ROW_SUM_TOLERANCE,
+) -> dict[str, Any]:
+    """Summarize attention row normalization without changing or repairing the values."""
+    layer_reports: list[dict[str, Any]] = []
+    worst_rows: list[dict[str, Any]] = []
+    total_rows = 0
+    total_bad_rows = 0
+    global_max_error = 0.0
+
+    for layer_index, layer in enumerate(attentions):
+        values = layer.detach().float()
+        row_sums = values.sum(dim=-1)
+        finite = torch.isfinite(row_sums)
+        finite_sums = row_sums[finite]
+        errors = (row_sums - 1.0).abs()
+        bad = ~finite | (errors > tolerance)
+        finite_errors = errors[finite]
+        layer_max_error = finite_errors.max().item() if finite_errors.numel() else None
+        bad_rows = int(bad.sum().item())
+        nonfinite_rows = int((~finite).sum().item())
+        layer_worst = _worst_attention_rows(
+            row_sums,
+            layer_index=layer_index,
+            limit=_WORST_ROWS_PER_LAYER,
+        )
+        layer_reports.append(
+            {
+                "layer": layer_index,
+                "shape": list(layer.shape),
+                "dtype": str(layer.dtype).removeprefix("torch."),
+                "row_sum_min": finite_sums.min().item() if finite_sums.numel() else None,
+                "row_sum_max": finite_sums.max().item() if finite_sums.numel() else None,
+                "max_error_from_one": layer_max_error,
+                "rows_exceeding_tolerance": bad_rows,
+                "nonfinite_rows": nonfinite_rows,
+                "total_rows": row_sums.numel(),
+                "representative_worst_rows": layer_worst,
+            }
+        )
+        worst_rows.extend(layer_worst)
+        total_rows += row_sums.numel()
+        total_bad_rows += bad_rows
+        if layer_max_error is not None:
+            global_max_error = max(global_max_error, layer_max_error)
+
+    worst_rows.sort(
+        key=lambda row: (
+            row["abs_error_from_one"] is None,
+            row["abs_error_from_one"] or 0.0,
+        ),
+        reverse=True,
+    )
+    attention_shapes_match_unpadded_input = all(
+        len(report["shape"]) >= 2
+        and report["shape"][-2] == sequence_length
+        and report["shape"][-1] == sequence_length
+        for report in layer_reports
+    )
+    return {
+        "tolerance": tolerance,
+        "passed": bool(layer_reports) and total_bad_rows == 0,
+        "layer_count": len(layer_reports),
+        "total_rows": total_rows,
+        "rows_exceeding_tolerance": total_bad_rows,
+        "max_error_from_one": global_max_error if layer_reports else None,
+        "layers": layer_reports,
+        "representative_worst_rows": worst_rows[:_WORST_ROWS_OVERALL],
+        "mask_padding_assessment": {
+            "input_padding_applied": False,
+            "input_sequence_length": sequence_length,
+            "attention_shapes_match_unpadded_input": attention_shapes_match_unpadded_input,
+            "padding_can_explain_failure": False,
+            "reason": (
+                "The smoke input is one unpadded sequence. Causal or bidirectional key masks may "
+                "zero individual attention entries, but valid softmax rows must still sum to one."
+            ),
+        },
+    }
+
 
 def load_adapter(cfg: RunConfig):
     """Load one pinned model adapter and verify its declared capabilities."""
@@ -111,9 +239,9 @@ def model_smoke_report(model, tokenizer, cfg: RunConfig, metadata: dict[str, Any
     second_logits, second_attentions, second_hidden = second
     logits = model.get_logits(hidden[-1]) if logits is None else logits
     second_logits = model.get_logits(second_hidden[-1]) if second_logits is None else second_logits
-    row_error = max(
-        (layer.float().sum(dim=-1) - 1).abs().max().detach().item()
-        for layer in attentions
+    attention_diagnostics = attention_normalization_diagnostics(
+        attentions,
+        sequence_length=input_ids.shape[-1],
     )
     determinism = max(
         [(logits.float() - second_logits.float()).abs().max().detach().item()]
@@ -122,8 +250,11 @@ def model_smoke_report(model, tokenizer, cfg: RunConfig, metadata: dict[str, Any
             for left, right in zip(attentions, second_attentions, strict=True)
         ]
     )
-    if row_error > 1e-3:
-        raise ArtifactError("attention rows do not sum to one")
+    if not attention_diagnostics["passed"]:
+        raise ArtifactError(
+            "attention rows do not sum to one; diagnostics="
+            + json.dumps(attention_diagnostics, sort_keys=True)
+        )
     if determinism > 1e-5:
         raise ArtifactError("model is nondeterministic in evaluation mode")
     return {
@@ -138,7 +269,8 @@ def model_smoke_report(model, tokenizer, cfg: RunConfig, metadata: dict[str, Any
         "logits_shape": list(logits.shape),
         "hidden_state_shapes": [list(value.shape) for value in hidden],
         "attention_shapes": [list(value.shape) for value in attentions],
-        "attention_row_sum_max_error": row_error,
+        "attention_row_sum_max_error": attention_diagnostics["max_error_from_one"],
+        "attention_normalization": attention_diagnostics,
         "determinism_max_abs_error": determinism,
         "final_depth_logit_lens_max_abs_error": (
             logits.float() - model.get_lm_head()(hidden[-1]).float()
