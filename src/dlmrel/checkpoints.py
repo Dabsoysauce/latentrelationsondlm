@@ -67,24 +67,46 @@ class SentenceCheckpointStore:
         legacy_path: str | Path | None = None,
     ) -> pd.DataFrame:
         """Reuse one legacy whole-seed file or resume at the first absent chunk."""
+        frames = list(
+            self.iter_chunks(
+                examples,
+                identity,
+                compute,
+                legacy_path=legacy_path,
+            )
+        )
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    def iter_chunks(
+        self,
+        examples: Sequence[T],
+        identity: CheckpointIdentity,
+        compute: Callable[[Sequence[T], int], pd.DataFrame],
+        *,
+        legacy_path: str | Path | None = None,
+    ):
+        """Yield validated chunks without concatenating a large stage in memory."""
+        sentence_ids = [str(example.sentence_id) for example in examples]
+        if len(sentence_ids) != len(set(sentence_ids)):
+            raise ArtifactError("checkpoint input contains duplicate sentence IDs")
         if legacy_path is not None:
             legacy = self._load_legacy(Path(legacy_path), identity, examples)
             if legacy is not None:
-                return legacy
+                yield legacy
+                return
 
-        frames: list[pd.DataFrame] = []
         for start in range(0, len(examples), self.chunk_size):
             end = min(start + self.chunk_size, len(examples))
             path = self.directory / identity.filename(start, end)
             expected = self._expected_metadata(examples, identity, start, end)
-            frame = self._load_chunk(path, expected)
+            frame = self._load_chunk(path, expected, sentence_ids[start:end])
             if frame is None:
                 frame = compute(examples[start:end], start)
                 if not isinstance(frame, pd.DataFrame):
                     raise TypeError("checkpoint computation must return a pandas DataFrame")
+                _validate_frame_sentence_ids(frame, sentence_ids[start:end])
                 self._write_chunk(path, frame, expected)
-            frames.append(frame)
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+            yield frame
 
     def _expected_metadata(
         self,
@@ -105,7 +127,9 @@ class SentenceCheckpointStore:
             "manifest_hashes": self.manifests,
         }
 
-    def _load_chunk(self, path: Path, expected: dict) -> pd.DataFrame | None:
+    def _load_chunk(
+        self, path: Path, expected: dict, expected_ids: Sequence[str]
+    ) -> pd.DataFrame | None:
         metadata_path = _metadata_path(path)
         _discard_temporary(path)
         _discard_temporary(metadata_path)
@@ -120,8 +144,9 @@ class SentenceCheckpointStore:
             frame = pd.read_parquet(path)
             if len(frame) != metadata.get("row_count"):
                 return None
+            _validate_frame_sentence_ids(frame, expected_ids)
             return frame
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        except (ArtifactError, OSError, ValueError, TypeError, json.JSONDecodeError):
             return None
 
     def _write_chunk(self, path: Path, frame: pd.DataFrame, expected: dict) -> None:
@@ -160,6 +185,12 @@ class SentenceCheckpointStore:
             actual = set(zip(frame["layer"].astype(int), frame["head"].astype(int), strict=True))
             if not actual.issubset(set(identity.heads)):
                 return None
+        try:
+            _validate_frame_sentence_ids(
+                frame, [str(example.sentence_id) for example in examples]
+            )
+        except ArtifactError:
+            return None
         expected = {
             **self._expected_metadata(examples, identity, 0, len(examples)),
             "legacy_whole_seed": True,
@@ -193,6 +224,17 @@ def _metadata_path(path: Path) -> Path:
 
 def _discard_temporary(path: Path) -> None:
     path.with_suffix(path.suffix + ".tmp").unlink(missing_ok=True)
+
+
+def _validate_frame_sentence_ids(frame: pd.DataFrame, expected_ids: Sequence[str]) -> None:
+    """Reject checkpoint rows assigned to sentences outside their input chunk."""
+    if frame.empty:
+        return
+    if "sentence_id" not in frame:
+        raise ArtifactError("nonempty sentence checkpoint is missing sentence_id")
+    actual = set(frame["sentence_id"].dropna().astype(str))
+    if frame["sentence_id"].isna().any() or not actual.issubset(set(expected_ids)):
+        raise ArtifactError("sentence checkpoint contains rows outside its sentence range")
 
 
 def _file_sha256(path: Path) -> str:

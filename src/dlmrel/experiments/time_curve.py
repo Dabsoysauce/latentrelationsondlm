@@ -7,9 +7,13 @@ from typing import Any
 
 import pandas as pd
 
-from ..artifacts import SelectionLock
 from ..config import RunConfig
 from ..data import load_manifest_examples
+from ..relation_selection import (
+    RelationLockSet,
+    filter_relation_locked_rows,
+    write_resolved_lock_manifest,
+)
 from .shared import score_over_seeds, write_frames
 
 
@@ -43,7 +47,7 @@ def run(
     cfg: RunConfig,
     run_dir: Path,
     *,
-    source_lock: SelectionLock,
+    source_locks: RelationLockSet,
 ) -> dict[str, Any]:
     examples, exclusions = load_manifest_examples(cfg, tokenizer, "test")
     frames = []
@@ -55,17 +59,23 @@ def run(
                 examples,
                 cfg,
                 role="test",
-                heads={(source_lock.layer, source_lock.head)},
+                heads=source_locks.heads,
                 normalized_progress=progress,
                 checkpoint_dir=run_dir / "checkpoints",
                 stage="time-curve",
                 seeds=[seed],
             )
             frames.append(frame)
-    raw = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    source_lock.write_once(run_dir / "selection_lock.json")
+    all_rows = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    raw = filter_relation_locked_rows(all_rows, source_locks)
+    write_resolved_lock_manifest(run_dir, source_locks)
     write_frames(run_dir, raw=raw, exclusions=exclusions)
     per_seed, metrics = aggregate_curve(raw)
     per_seed.to_csv(run_dir / "per_seed_metrics.csv", index=False)
     metrics.to_csv(run_dir / "metrics.csv", index=False)
-    return {"n_rows": len(raw), "n_sentences": len(examples), "test_heads_exposed": 1}
+    return {
+        "n_rows": len(raw),
+        "n_sentences": len(examples),
+        "test_heads_exposed": len(source_locks.heads),
+        "test_relation_locks_applied": len(source_locks.locks),
+    }

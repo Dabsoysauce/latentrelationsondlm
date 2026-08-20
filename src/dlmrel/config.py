@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import MISSING, asdict, dataclass, field, fields, is_dataclass
+import re
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, TypeVar, get_args, get_origin, get_type_hints
 
@@ -26,6 +27,16 @@ SUBJECT_DEPS = frozenset({"nsubj", "csubj"})
 OBJECT_DEPS = frozenset({"obj", "iobj"})
 NOUN_UPOS = frozenset({"NOUN", "PROPN"})
 VERB_UPOS = frozenset({"VERB", "AUX"})
+PROTOCOL_SEEDS = [42, 43, 44]
+PROTOCOL_STEPS = 64
+PROTOCOL_PROGRESS = {
+    "head_search": [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0],
+    "time_curve": [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0],
+    "attention_entropy": [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0],
+    "logit_lens": [0.0, 0.25, 0.5, 0.75, 1.0],
+    "pos_probe": [0.5],
+}
+_SHA256 = re.compile(r"sha256:[0-9a-fA-F]{64}\Z")
 
 
 class ConfigError(ValueError):
@@ -58,9 +69,13 @@ class DatasetConfig:
             raise ConfigError("dataset id, treebank, and revision are required")
         if (self.select_from, self.dev_from, self.test_from) != ("train", "dev", "test"):
             raise ConfigError("rigorous datasets must map select/dev/test to official train/dev/test")
-        for split, digest in self.checksums.items():
-            if split not in {"train", "dev", "test"} or not digest.startswith("sha256:"):
-                raise ConfigError("dataset checksums must be sha256:<hex> for train/dev/test")
+        if set(self.checksums) != {"train", "dev", "test"}:
+            raise ConfigError("dataset checksums must contain exactly train, dev, and test")
+        if any(
+            not isinstance(digest, str) or not _SHA256.fullmatch(digest)
+            for digest in self.checksums.values()
+        ):
+            raise ConfigError("dataset checksums must be sha256:<64 hex characters>")
 
 
 @dataclass(frozen=True)
@@ -88,6 +103,8 @@ class ModelConfig:
             raise ConfigError("model revision must be immutable, not main/master")
         if self.remote_code_revision in {"main", "master"}:
             raise ConfigError("remote-code revision must be immutable")
+        if not self.tokenizer_revision or self.tokenizer_revision in {"main", "master"}:
+            raise ConfigError("tokenizer revision must be immutable, not main/master")
 
 
 @dataclass(frozen=True)
@@ -119,13 +136,18 @@ class ExperimentConfig:
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
 
     def validate(self) -> None:
-        if self.seeds != [42, 43, 44]:
+        if self.seeds != PROTOCOL_SEEDS:
             raise ConfigError("experiment seeds must be exactly [42, 43, 44]")
-        if self.steps < 1:
-            raise ConfigError("experiment steps must be positive")
+        if self.steps != PROTOCOL_STEPS:
+            raise ConfigError("experiment steps must be exactly 64")
         if any(x < 0 or x > 1 for x in self.normalized_progress):
             raise ConfigError("normalized progress must lie in [0, 1]")
+        expected_progress = PROTOCOL_PROGRESS.get(self.type)
+        if expected_progress is not None and self.normalized_progress != expected_progress:
+            raise ConfigError(f"normalized progress does not match the frozen {self.type} protocol")
         self.scoring.validate()
+        if self.scoring != ScoringConfig():
+            raise ConfigError("scoring settings do not match the frozen protocol")
 
 
 @dataclass(frozen=True)
@@ -245,9 +267,7 @@ def _strict_dataclass(cls: type[T], raw: dict[str, Any], where: str) -> T:
     values: dict[str, Any] = {}
     for item in fields(cls):
         if item.name not in raw:
-            if item.default is MISSING and item.default_factory is MISSING:
-                raise ConfigError(f"missing required {where} field: {item.name}")
-            continue
+            raise ConfigError(f"missing required {where} field: {item.name}")
         value = raw[item.name]
         nested = _nested_dataclass(hints.get(item.name, item.type))
         values[item.name] = _strict_dataclass(nested, value, f"{where}.{item.name}") if nested else value

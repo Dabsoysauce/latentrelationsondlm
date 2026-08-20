@@ -39,11 +39,13 @@ command, environment, manifests, exclusions, raw rows, seed summaries, and
 validation result. Completed runs cannot be silently overwritten.
 
 Head search creates independent select/dev locks for the six canonical
-relations. Only `object_to_verb` is the primary confirmatory relation and only
-that locked head is exposed to EWT test. The other five locks are predefined
-secondary selections, not test results. A completed legacy all-head run can be
-converted with `derive-relation-locks`; that command performs no model
-inference and does not read or modify locked-test artifacts.
+relations. `object_to_verb` remains the primary confirmatory relation; the
+other five are predefined secondaries. New test and downstream runs resolve
+each relation to its own lock, while legacy `selection_lock.json` files remain
+object-only. A completed legacy all-head select/dev run can be converted with
+`derive-relation-locks`; that command performs no model inference and does not
+read or modify locked-test artifacts. Existing object-head-only test rows are
+not six-relation results and cannot supply the corrected permutation test.
 
 ## Repository map
 
@@ -57,4 +59,5 @@ docs/         Protocol, running instructions, and verified status
 
 - [Frozen protocol](docs/PROTOCOL.md)
 - [How to run the GPU experiments](docs/RUNNING.md)
+- [Guarded Modal execution and repair workflow](docs/MODAL.md)
 - [Implementation and preliminary-result status](docs/STATUS.md)

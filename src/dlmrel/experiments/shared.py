@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..artifacts import ArtifactError, write_shard
+from ..artifacts import ArtifactError, dataframe_records, write_shard
 from ..checkpoints import CheckpointIdentity, SentenceCheckpointStore
 from ..config import RunConfig
 from ..controls import matched_word, receiver_controls
@@ -68,7 +68,9 @@ def score_attention_heads(
                 and max(example.word_to_tokens[word]) < len(state.is_visible)
             ]
             if instance.receiver_word_idx not in candidate_words:
-                continue
+                raise ArtifactError(
+                    f"gold receiver is not a valid aligned candidate: {instance.instance_id}"
+                )
             candidate_spans = [example.word_to_tokens[word] for word in candidate_words]
             gold_index = candidate_words.index(instance.receiver_word_idx)
             visibility = endpoint_visibility(state.is_visible, instance.attender_span, instance.receiver_span)
@@ -237,15 +239,23 @@ def aggregate_head_scores(rows: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def locked_metrics(rows: pd.DataFrame, fixed_offset: int | None) -> pd.DataFrame:
+def locked_metrics(
+    rows: pd.DataFrame, fixed_offset: int | None | dict[str, int | None]
+) -> pd.DataFrame:
     if rows.empty:
         return pd.DataFrame()
     frame = rows.copy()
-    frame["fixed_offset_correct"] = (
-        frame["attender_word_idx"] + fixed_offset == frame["receiver_word_idx"]
-        if fixed_offset is not None
-        else False
-    )
+    if isinstance(fixed_offset, dict):
+        offsets = frame["relation"].map(fixed_offset)
+        frame["fixed_offset_correct"] = offsets.notna() & (
+            frame["attender_word_idx"] + offsets.fillna(0) == frame["receiver_word_idx"]
+        )
+    else:
+        frame["fixed_offset_correct"] = (
+            frame["attender_word_idx"] + fixed_offset == frame["receiver_word_idx"]
+            if fixed_offset is not None
+            else False
+        )
     keys = ["treebank", "relation", "layer", "head", "visibility"]
     metrics = frame.groupby(keys, as_index=False).agg(
         accuracy=("correct", "mean"),
@@ -274,130 +284,6 @@ def per_seed_metrics(rows: pd.DataFrame) -> pd.DataFrame:
     return rows.groupby(
         ["seed", "treebank", "relation", "layer", "head", "visibility"], as_index=False
     ).agg(accuracy=("correct", "mean"), n_instances=("correct", "size"))
-
-
-def selection_aware_permutation(
-    select_rows: pd.DataFrame,
-    dev_rows: pd.DataFrame,
-    *,
-    relation: str,
-    top_k: int,
-    n_permutations: int,
-    seed: int,
-    minimum_denominator: int = 1,
-) -> dict[str, Any]:
-    """Repeat select-top-K and dev-choice under permuted receiver labels."""
-    select = select_rows[select_rows["relation"] == relation].copy()
-    dev = dev_rows[dev_rows["relation"] == relation].copy()
-    if select.empty or dev.empty:
-        return {"p_value": float("nan"), "n_permutations": 0, "reason": "no_rows"}
-    head_keys = ["layer", "head"]
-    observed_top = aggregate_head_scores(select)
-    observed_top = observed_top[observed_top["n_total"] >= minimum_denominator].sort_values(
-        ["accuracy", "n_total", "layer", "head"], ascending=[False, False, True, True]
-    ).head(top_k)
-    if observed_top.empty:
-        return {
-            "p_value": float("nan"),
-            "n_permutations": 0,
-            "reason": "no_select_head_meets_minimum_denominator",
-        }
-    observed_dev = aggregate_head_scores(dev).merge(observed_top[head_keys], on=head_keys, how="inner")
-    observed_dev = observed_dev[observed_dev["n_total"] >= minimum_denominator]
-    if observed_dev.empty:
-        return {
-            "p_value": float("nan"),
-            "n_permutations": 0,
-            "reason": "no_dev_candidate_meets_minimum_denominator",
-        }
-    observed = float(observed_dev["accuracy"].max())
-    rng = np.random.default_rng(seed)
-    select_arrays = _permutation_arrays(select)
-    dev_arrays = _permutation_arrays(dev)
-    dev_head_lookup = {head: index for index, head in enumerate(dev_arrays["heads"])}
-    null_scores = []
-    for _ in range(n_permutations):
-        select_accuracy = _permuted_accuracies(select_arrays, rng)
-        dev_accuracy = _permuted_accuracies(dev_arrays, rng)
-        eligible_select = [
-            index
-            for index, denominator in enumerate(select_arrays["denominators"])
-            if denominator >= minimum_denominator
-        ]
-        ranked_select = sorted(
-            eligible_select,
-            key=lambda index: (
-                -select_accuracy[index],
-                -select_arrays["denominators"][index],
-                *select_arrays["heads"][index],
-            ),
-        )[:top_k]
-        dev_candidates = [
-            dev_head_lookup[select_arrays["heads"][index]]
-            for index in ranked_select
-            if select_arrays["heads"][index] in dev_head_lookup
-            and dev_arrays["denominators"][dev_head_lookup[select_arrays["heads"][index]]]
-            >= minimum_denominator
-        ]
-        if not dev_candidates:
-            raise ArtifactError("permutation lost every denominator-eligible dev candidate")
-        winner = min(
-            dev_candidates,
-            key=lambda index: (
-                -dev_accuracy[index],
-                -dev_arrays["denominators"][index],
-                *dev_arrays["heads"][index],
-            ),
-        )
-        null_scores.append(float(dev_accuracy[winner]))
-    return {
-        "observed_dev_accuracy": observed,
-        "p_value": (1 + sum(value >= observed for value in null_scores)) / (n_permutations + 1),
-        "n_permutations": n_permutations,
-        "null_mean": float(np.mean(null_scores)),
-        "null_std": float(np.std(null_scores)),
-    }
-
-
-def _permutation_arrays(frame: pd.DataFrame) -> dict[str, Any]:
-    """Encode one role once so each null draw uses only NumPy operations."""
-    instance_keys = ["sentence_id", "instance_id"]
-    instances = frame[[*instance_keys, "gold_receiver_word_idx"]].drop_duplicates()
-    if instances.duplicated(instance_keys).any():
-        raise ArtifactError("one relation instance has inconsistent gold receivers")
-    instance_index = pd.MultiIndex.from_frame(instances[instance_keys])
-    row_instances = instance_index.get_indexer(pd.MultiIndex.from_frame(frame[instance_keys]))
-    if (row_instances < 0).any():
-        raise ArtifactError("could not index relation instances for permutation")
-    heads = sorted(
-        (int(layer), int(head))
-        for layer, head in frame[["layer", "head"]].drop_duplicates().itertuples(index=False)
-    )
-    head_index = pd.MultiIndex.from_tuples(heads, names=["layer", "head"])
-    row_heads = head_index.get_indexer(pd.MultiIndex.from_frame(frame[["layer", "head"]]))
-    return {
-        "heads": heads,
-        "row_instances": row_instances,
-        "row_heads": row_heads,
-        "predictions": frame["predicted_word_idx"].to_numpy(),
-        "gold": instances["gold_receiver_word_idx"].to_numpy(),
-        "denominators": np.bincount(row_heads, minlength=len(heads)),
-    }
-
-
-def _permuted_accuracies(arrays: dict[str, Any], rng) -> np.ndarray:
-    labels = arrays["gold"].copy()
-    rng.shuffle(labels)
-    correct = arrays["predictions"] == labels[arrays["row_instances"]]
-    counts = np.bincount(
-        arrays["row_heads"], weights=correct.astype(np.int64), minlength=len(arrays["heads"])
-    )
-    return np.divide(
-        counts,
-        arrays["denominators"],
-        out=np.zeros_like(counts, dtype=float),
-        where=arrays["denominators"] > 0,
-    )
 
 
 def structural_slices(rows: pd.DataFrame) -> pd.DataFrame:
@@ -436,4 +322,8 @@ def write_frames(run_dir: Path, *, raw: pd.DataFrame, exclusions: pd.DataFrame) 
         exclusions = pd.DataFrame(columns=["sentence_id", "instance_id", "role", "reason"])
     exclusions.to_parquet(run_dir / "exclusions.parquet", index=False)
     for shard_id, start in enumerate(range(0, len(raw), 10_000)):
-        write_shard(run_dir, shard_id, raw.iloc[start : start + 10_000].to_dict("records"))
+        write_shard(
+            run_dir,
+            shard_id,
+            dataframe_records(raw.iloc[start : start + 10_000]),
+        )

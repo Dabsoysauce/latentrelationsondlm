@@ -6,7 +6,7 @@ import argparse
 import json
 import shlex
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,6 +18,12 @@ from .config import ConfigError, DatasetConfig, RunConfig, RuntimeConfig, _stric
 from .data import load_audit, manifest_root, prepare_manifests
 from .evaluation.compare_models import compare_runs
 from .fake_run import run_fake
+from .head_search_recovery import (
+    complete_cpu_finalization,
+    load_saved_head_search_config,
+    recovery_status,
+    score_missing_test_grid,
+)
 from .pipeline import load_adapter, model_smoke_report, run_real
 from .relation_selection import derive_relation_selection_bundle
 
@@ -174,6 +180,72 @@ def cmd_derive_relation_locks(args) -> None:
     )
 
 
+def cmd_recover_head_search_test_grid(args) -> None:
+    """Run only the missing Dream all-head test grid on an existing run."""
+    run = Path(args.run_dir)
+    cfg = load_saved_head_search_config(run)
+    status = recovery_status(run, cfg)
+    if not status["missing_test_grid_required"]:
+        print(json.dumps({**status, "model_loaded": False}, indent=2, sort_keys=True))
+        return
+    summary_path = run / "summary.json"
+    if summary_path.is_file():
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        if summary.get("completion_status") == "complete":
+            raise ArtifactError("a completed run cannot be given new all-head evidence")
+
+    audit = load_audit(cfg.dataset)
+    resumed = replace(cfg, runtime=replace(cfg.runtime, resume=True, dry_run=False))
+    command = " ".join(shlex.quote(piece) for piece in ["dlmrel", *sys.argv[1:]])
+    initialize_run(
+        run,
+        resumed.to_dict(),
+        command,
+        audit["manifest_hashes"],
+        resume=True,
+    )
+    model, tokenizer, model_metadata = load_adapter(resumed)
+    report, _locked, _exclusions = score_missing_test_grid(
+        model,
+        tokenizer,
+        resumed,
+        run,
+        model_metadata=model_metadata,
+        collect_locked_rows=False,
+        reuse_existing_locked=True,
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
+def cmd_finalize_head_search(args) -> None:
+    """Finalize a saved head search from disk without loading a model/tokenizer."""
+    run = Path(args.run_dir)
+    cfg = load_saved_head_search_config(run)
+    summary_path = run / "summary.json"
+    already_complete = False
+    if summary_path.is_file():
+        try:
+            already_complete = (
+                json.loads(summary_path.read_text(encoding="utf-8")).get("completion_status")
+                == "complete"
+            )
+        except json.JSONDecodeError as error:
+            raise ArtifactError("existing head-search summary is unreadable") from error
+    if not already_complete:
+        manifests = json.loads((run / "manifest_refs.json").read_text(encoding="utf-8"))
+        resumed = replace(cfg, runtime=replace(cfg.runtime, resume=True, dry_run=False))
+        command = " ".join(shlex.quote(piece) for piece in ["dlmrel", *sys.argv[1:]])
+        initialize_run(run, resumed.to_dict(), command, manifests, resume=True)
+        cfg = resumed
+    result = complete_cpu_finalization(
+        cfg,
+        run,
+        n_permutations=10 if cfg.model.family == "fake" else 1000,
+        checkpoint_interval=5 if cfg.model.family == "fake" else 50,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dlmrel", description="Rigorous DLM relation analysis")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -218,6 +290,20 @@ def build_parser() -> argparse.ArgumentParser:
     derive.add_argument("--source-run", required=True)
     derive.add_argument("--output", required=True)
     derive.set_defaults(func=cmd_derive_relation_locks)
+
+    recover_grid = commands.add_parser(
+        "recover-head-search-test-grid",
+        help="score only missing all-head EWT test evidence for an existing run",
+    )
+    recover_grid.add_argument("--run-dir", required=True)
+    recover_grid.set_defaults(func=cmd_recover_head_search_test_grid)
+
+    finalize = commands.add_parser(
+        "finalize-head-search",
+        help="finish selection-aware inference and metrics from saved evidence on CPU",
+    )
+    finalize.add_argument("--run-dir", required=True)
+    finalize.set_defaults(func=cmd_finalize_head_search)
     return parser
 
 

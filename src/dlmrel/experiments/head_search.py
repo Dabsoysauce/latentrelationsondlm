@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -10,13 +9,22 @@ import pandas as pd
 
 from ..artifacts import (
     ArtifactError,
-    SelectionLock,
-    atomic_json,
-    selection_lock_hash,
+    selection_source_hash,
 )
 from ..config import RunConfig
 from ..data import load_manifest_examples
-from ..relation_selection import derive_relation_selection_bundle, install_primary_aliases
+from ..head_search_recovery import (
+    finalize_head_search_artifacts,
+    score_missing_test_grid,
+)
+from ..relation_selection import (
+    RelationLockSet,
+    derive_relation_selection_bundle,
+    filter_relation_locked_rows,
+    install_primary_aliases,
+    load_relation_locks,
+    write_resolved_lock_manifest,
+)
 from .shared import (
     aggregate_head_scores,
     locked_metrics,
@@ -34,13 +42,21 @@ def run(
     run_dir: Path,
     *,
     manifest_hashes: dict[str, str],
-    source_lock: SelectionLock | None = None,
+    source_locks: RelationLockSet | None = None,
+    model_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if cfg.track == "external_treebank_transfer":
-        if source_lock is None:
+        if source_locks is None:
             raise ArtifactError("external transfer requires an EWT selection lock")
-        return run_locked_transfer(model, tokenizer, cfg, run_dir, source_lock)
-    return run_head_search(model, tokenizer, cfg, run_dir, manifest_hashes)
+        return run_locked_transfer(model, tokenizer, cfg, run_dir, source_locks)
+    return run_head_search(
+        model,
+        tokenizer,
+        cfg,
+        run_dir,
+        manifest_hashes,
+        model_metadata=model_metadata,
+    )
 
 
 def run_head_search(
@@ -49,11 +65,12 @@ def run_head_search(
     cfg: RunConfig,
     run_dir: Path,
     manifest_hashes: dict[str, str],
+    *,
+    model_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Search select, choose among top K on dev, and expose one head on test."""
+    """Select six relation heads, score the test grid, then apply each matching lock."""
     select_examples, select_exclusions = load_manifest_examples(cfg, tokenizer, "select")
     dev_examples, dev_exclusions = load_manifest_examples(cfg, tokenizer, "dev")
-    test_examples, test_exclusions = load_manifest_examples(cfg, tokenizer, "test")
     checkpoints = run_dir / "checkpoints"
     select_rows = score_over_seeds(
         model, tokenizer, select_examples, cfg, role="select", checkpoint_dir=checkpoints,
@@ -77,53 +94,22 @@ def run_head_search(
         allow_existing=True,
     )
     install_primary_aliases(run_dir, relation_bundle)
-    lock = relation_bundle.primary_lock
-    if lock is None:
-        raise ArtifactError("primary object_to_verb relation has insufficient selection evidence")
-    fixed_offset = lock.frozen_settings.get("fixed_offset")
+    locks = load_relation_locks(relation_bundle.output_dir, cfg)
 
-    test_rows = score_over_seeds(
+    _recovery_report, test_rows, test_exclusions = score_missing_test_grid(
         model,
         tokenizer,
-        test_examples,
         cfg,
-        role="test",
-        heads={(lock.layer, lock.head)},
-        checkpoint_dir=checkpoints,
-        stage="test-locked-head",
+        run_dir,
+        model_metadata=model_metadata,
+        collect_locked_rows=True,
+        reuse_existing_locked=False,
     )
-    if test_rows[["layer", "head"]].drop_duplicates().shape[0] != 1:
-        raise ArtifactError("locked test must expose exactly one head")
+    _validate_relation_test_rows(test_rows, locks)
     exclusions = pd.concat([select_exclusions, dev_exclusions, test_exclusions], ignore_index=True)
     write_frames(run_dir, raw=test_rows, exclusions=exclusions)
-    metrics = locked_metrics(test_rows, fixed_offset)
-    permutation_table = pd.read_csv(relation_bundle.output_dir / "permutation_results.csv")
-    primary_permutation = permutation_table[
-        permutation_table["relation"] == cfg.experiment.scoring.primary_relation
-    ].iloc[0]
-    permutation = {
-        "observed_dev_accuracy": float(primary_permutation["observed_dev_accuracy"]),
-        "p_value": float(primary_permutation["raw_p_value"]),
-        "n_permutations": int(primary_permutation["n_permutations"]),
-        "null_mean": float(primary_permutation["null_mean"]),
-        "null_std": float(primary_permutation["null_std"]),
-        "family": "primary_separate",
-    }
-    metrics["selection_permutation_p"] = permutation["p_value"]
-    metrics.to_csv(run_dir / "metrics.csv", index=False)
-    per_seed_metrics(test_rows).to_csv(run_dir / "per_seed_metrics.csv", index=False)
-    structural_slices(test_rows).to_csv(run_dir / "structural_slices.csv", index=False)
-    atomic_json(run_dir / "selection_permutation.json", permutation)
-    return {
-        "selection_lock": asdict(lock),
-        "n_select_sentences": len(select_examples),
-        "n_dev_sentences": len(dev_examples),
-        "n_test_sentences": len(test_examples),
-        "n_test_instances": int(test_rows["instance_id"].nunique()),
-        "test_heads_exposed": 1,
-        "relation_selection_bundle": "relation-selection/relation_selection_bundle.json",
-        "secondary_relations": "predefined_selected_not_tested",
-    }
+    del select_rows, dev_rows, test_rows
+    return finalize_head_search_artifacts(cfg, run_dir)
 
 
 def run_locked_transfer(
@@ -131,31 +117,55 @@ def run_locked_transfer(
     tokenizer,
     cfg: RunConfig,
     run_dir: Path,
-    source_lock: SelectionLock,
+    source_locks: RelationLockSet,
 ) -> dict[str, Any]:
     examples, exclusions = load_manifest_examples(cfg, tokenizer, "test")
+    progress_values = {
+        float(lock.frozen_settings["selection_progress"])
+        for lock in source_locks.locks.values()
+    }
+    if len(progress_values) != 1:
+        raise ArtifactError("relation locks disagree on frozen selection progress")
     rows = score_over_seeds(
         model,
         tokenizer,
         examples,
         cfg,
         role="test",
-        heads={(source_lock.layer, source_lock.head)},
-        normalized_progress=float(source_lock.frozen_settings["selection_progress"]),
+        heads=source_locks.heads,
+        normalized_progress=progress_values.pop(),
         checkpoint_dir=run_dir / "checkpoints",
         stage="external-test-locked-head",
     )
-    source_lock.write_once(run_dir / "selection_lock.json")
+    rows = filter_relation_locked_rows(rows, source_locks)
+    _validate_relation_test_rows(rows, source_locks)
+    write_resolved_lock_manifest(run_dir, source_locks)
     write_frames(run_dir, raw=rows, exclusions=exclusions)
-    locked_metrics(rows, source_lock.frozen_settings.get("fixed_offset")).to_csv(
+    offsets = {
+        relation: lock.frozen_settings.get("fixed_offset")
+        for relation, lock in source_locks.locks.items()
+    }
+    locked_metrics(rows, offsets).to_csv(
         run_dir / "metrics.csv", index=False
     )
     per_seed_metrics(rows).to_csv(run_dir / "per_seed_metrics.csv", index=False)
     structural_slices(rows).to_csv(run_dir / "structural_slices.csv", index=False)
     return {
-        "source_selection_dataset": source_lock.dataset_id,
-        "source_selection_hash": selection_lock_hash(source_lock),
+        "source_selection_dataset": "ewt",
+        "source_selection_hash": selection_source_hash(source_locks.source),
+        "source_selection_kind": source_locks.source_kind,
         "n_test_sentences": len(examples),
         "n_test_instances": int(rows["instance_id"].nunique()),
         "test_heads_exposed": int(rows[["layer", "head"]].drop_duplicates().shape[0]),
+        "test_relation_locks_applied": len(source_locks.locks),
     }
+
+
+def _validate_relation_test_rows(rows: pd.DataFrame, locks: RelationLockSet) -> None:
+    if not set(rows.get("relation", pd.Series(dtype=str))).issubset(locks.locks):
+        raise ArtifactError("locked test rows contain a relation without a matching lock")
+    for relation, group in rows.groupby("relation", observed=True):
+        lock = locks.resolve(str(relation))
+        heads = set(group[["layer", "head"]].itertuples(index=False, name=None))
+        if heads != {(lock.layer, lock.head)}:
+            raise ArtifactError(f"test rows do not match the frozen lock for {relation!r}")

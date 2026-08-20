@@ -1,5 +1,6 @@
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -18,6 +19,8 @@ from dlmrel.relation_selection import (
     REQUIRED_SEEDS,
     SECONDARY_RELATIONS,
     derive_relation_selection_bundle,
+    filter_relation_locked_rows,
+    load_relation_locks,
 )
 
 ROOT = Path(__file__).parents[1]
@@ -129,7 +132,7 @@ def _rewrite_rows(source: Path, role: str, rows: pd.DataFrame) -> None:
 
 def test_six_relation_two_phase_locks_are_independent_and_auditable(tmp_path):
     source = _make_source(tmp_path)
-    build = derive_relation_selection_bundle(source, tmp_path / "derived", n_permutations=7)
+    build = derive_relation_selection_bundle(source, tmp_path / "derived")
     bundle = build.bundle
 
     assert tuple(bundle["relations"]) == RELATION_NAMES
@@ -161,21 +164,15 @@ def test_six_relation_two_phase_locks_are_independent_and_auditable(tmp_path):
         build.output_dir / "locks/object_to_verb.json"
     ).read_bytes()
 
-    permutation = pd.read_csv(build.output_dir / "permutation_results.csv")
-    assert set(permutation.relation) == set(RELATION_NAMES)
-    assert pd.isna(permutation.loc[permutation.relation == PRIMARY_RELATION, "holm_adjusted_p_value"]).all()
-    secondaries = permutation[permutation.relation.isin(SECONDARY_RELATIONS)].sort_values(
-        "raw_p_value", kind="mergesort"
-    )
-    running = 0.0
-    for rank, row in enumerate(secondaries.itertuples(), start=1):
-        running = max(running, min(1.0, (6 - rank) * row.raw_p_value))
-        assert row.holm_adjusted_p_value == pytest.approx(running)
+    assert bundle["permutation_status"].startswith("requires_all_head_test_evidence")
+    assert not (build.output_dir / "permutation_results.csv").exists()
+    assert object_lock["frozen_settings"]["select_candidate_evidence"]
+    assert object_lock["frozen_settings"]["dev_decision_evidence"]
 
 
 def test_minimum_denominator_produces_insufficient_status_without_forced_lock(tmp_path):
     source = _make_source(tmp_path, low_evidence_relation="subject_det_to_noun")
-    build = derive_relation_selection_bundle(source, tmp_path / "derived", n_permutations=2)
+    build = derive_relation_selection_bundle(source, tmp_path / "derived")
     record = build.bundle["relations"]["subject_det_to_noun"]
 
     assert record["status"] == "insufficient_evidence"
@@ -198,9 +195,9 @@ def test_offline_derivation_never_reads_or_modifies_locked_test_artifacts(
         return original_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", guarded_read_text)
-    first = derive_relation_selection_bundle(source, tmp_path / "derived-a", n_permutations=2)
+    first = derive_relation_selection_bundle(source, tmp_path / "derived-a")
     (source / "metrics.csv").write_text("different locked test outcome\n", encoding="utf-8")
-    second = derive_relation_selection_bundle(source, tmp_path / "derived-b", n_permutations=2)
+    second = derive_relation_selection_bundle(source, tmp_path / "derived-b")
 
     before["metrics.csv"] = hashlib.sha256((source / "metrics.csv").read_bytes()).hexdigest()
     assert _file_hashes(source) == before
@@ -213,16 +210,14 @@ def test_offline_derivation_never_reads_or_modifies_locked_test_artifacts(
 def test_output_is_write_once_and_corrupt_existing_bundle_is_rejected(tmp_path):
     source = _make_source(tmp_path)
     output = tmp_path / "derived"
-    derive_relation_selection_bundle(source, output, n_permutations=2)
+    derive_relation_selection_bundle(source, output)
     with pytest.raises(ArtifactError, match="refusing to overwrite"):
-        derive_relation_selection_bundle(source, output, n_permutations=2)
+        derive_relation_selection_bundle(source, output)
 
     candidate = output / "candidates/object_to_verb_select.csv"
     candidate.write_text(candidate.read_text() + "corrupt\n", encoding="utf-8")
     with pytest.raises(ArtifactError, match="candidate table hash mismatch"):
-        derive_relation_selection_bundle(
-            source, output, allow_existing=True, n_permutations=2
-        )
+        derive_relation_selection_bundle(source, output, allow_existing=True)
 
 
 def test_failed_derivation_never_publishes_a_partial_output(tmp_path, monkeypatch):
@@ -230,11 +225,11 @@ def test_failed_derivation_never_publishes_a_partial_output(tmp_path, monkeypatc
     output = tmp_path / "derived"
 
     def fail_before_publish(*_args, **_kwargs):
-        raise RuntimeError("simulated permutation failure")
+        raise RuntimeError("simulated bundle failure")
 
-    monkeypatch.setattr(relation_selection, "_permutation_results", fail_before_publish)
+    monkeypatch.setattr(relation_selection, "_write_bundle", fail_before_publish)
     with pytest.raises(RuntimeError, match="simulated"):
-        derive_relation_selection_bundle(source, output, n_permutations=2)
+        derive_relation_selection_bundle(source, output)
     assert not output.exists()
     assert not list(tmp_path.glob(".derived.tmp-*"))
 
@@ -246,7 +241,6 @@ def test_fresh_and_posthoc_derivation_create_identical_locks(tmp_path):
         source / "relation-selection",
         require_complete=False,
         allow_source_output=True,
-        n_permutations=2,
     )
     metadata_path = source / "run_metadata.json"
     metadata = json.loads(metadata_path.read_text())
@@ -256,7 +250,7 @@ def test_fresh_and_posthoc_derivation_create_identical_locks(tmp_path):
         source / "validation.json",
         {"schema_version": "dlmrel-run-v1", "valid": True, "errors": []},
     )
-    posthoc = derive_relation_selection_bundle(source, tmp_path / "posthoc", n_permutations=2)
+    posthoc = derive_relation_selection_bundle(source, tmp_path / "posthoc")
 
     for relation in RELATION_NAMES:
         assert (fresh.output_dir / f"locks/{relation}.json").read_bytes() == (
@@ -269,7 +263,7 @@ def test_cli_offline_command_does_not_load_a_model(tmp_path, monkeypatch, capsys
     real_derive = cli.derive_relation_selection_bundle
 
     def small_derivation(source_run, output):
-        return real_derive(source_run, output, n_permutations=2)
+        return real_derive(source_run, output)
 
     def forbidden_model_load(*_args, **_kwargs):
         raise AssertionError("offline derivation attempted model inference")
@@ -314,7 +308,7 @@ def test_source_validation_rejects_invalid_selection_evidence(tmp_path, failure)
         _rewrite_rows(source, "dev", dev)
         message = "grid"
     with pytest.raises(ArtifactError, match=message):
-        derive_relation_selection_bundle(source, tmp_path / "derived", n_permutations=1)
+        derive_relation_selection_bundle(source, tmp_path / "derived")
 
 
 def test_source_validation_rejects_manifest_and_revision_tampering(tmp_path):
@@ -323,7 +317,7 @@ def test_source_validation_rejects_manifest_and_revision_tampering(tmp_path):
     manifests["dev"] = manifests["select"]
     atomic_json(source / "manifest_refs.json", manifests)
     with pytest.raises(ArtifactError, match="manifest"):
-        derive_relation_selection_bundle(source, tmp_path / "manifest-output", n_permutations=1)
+        derive_relation_selection_bundle(source, tmp_path / "manifest-output")
 
     source = _make_source(tmp_path / "second")
     config_path = source / "config.resolved.yaml"
@@ -331,4 +325,87 @@ def test_source_validation_rejects_manifest_and_revision_tampering(tmp_path):
     config["model"]["revision"] = "main"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     with pytest.raises((ArtifactError, ValueError), match="revision"):
-        derive_relation_selection_bundle(source, tmp_path / "revision-output", n_permutations=1)
+        derive_relation_selection_bundle(source, tmp_path / "revision-output")
+
+
+def test_relation_evidence_change_invalidates_only_its_own_lock(tmp_path):
+    first_source = _make_source(tmp_path / "first")
+    second_source = _make_source(tmp_path / "second")
+    changed = pd.read_parquet(second_source / "select_instances.parquet")
+    row = changed.index[changed.relation == "subject_to_verb"][0]
+    gold = int(changed.loc[row, "gold_receiver_word_idx"])
+    changed.loc[row, "predicted_word_idx"] = 999 if changed.loc[row, "correct"] else gold
+    changed.loc[row, "correct"] = 1 - int(changed.loc[row, "correct"])
+    _rewrite_rows(second_source, "select", changed)
+
+    first = derive_relation_selection_bundle(first_source, tmp_path / "first-bundle")
+    second = derive_relation_selection_bundle(second_source, tmp_path / "second-bundle")
+
+    assert (first.output_dir / "locks/object_to_verb.json").read_bytes() == (
+        second.output_dir / "locks/object_to_verb.json"
+    ).read_bytes()
+    assert (first.output_dir / "locks/subject_to_verb.json").read_bytes() != (
+        second.output_dir / "locks/subject_to_verb.json"
+    ).read_bytes()
+
+
+def test_downstream_resolves_each_relation_and_legacy_alias_is_object_only(tmp_path):
+    source = _make_source(tmp_path)
+    build = derive_relation_selection_bundle(source, tmp_path / "derived")
+    locks = load_relation_locks(build.output_dir)
+    rows = []
+    for relation in RELATION_NAMES:
+        lock = locks.resolve(relation)
+        rows.extend(
+            [
+                {"relation": relation, "layer": lock.layer, "head": lock.head},
+                {"relation": relation, "layer": 99, "head": 99},
+            ]
+        )
+    filtered = filter_relation_locked_rows(pd.DataFrame(rows), locks)
+
+    assert len(filtered) == len(RELATION_NAMES)
+    for row in filtered.itertuples(index=False):
+        lock = locks.resolve(row.relation)
+        assert (row.layer, row.head) == (lock.layer, lock.head)
+
+    legacy = load_relation_locks(build.output_dir / "selection_lock.json")
+    assert set(legacy.locks) == {PRIMARY_RELATION}
+    with pytest.raises(ArtifactError, match="no lock"):
+        legacy.resolve("subject_to_verb")
+
+    old_style_path = tmp_path / "old-style-object-lock.json"
+    old_style = json.loads(
+        (build.output_dir / "selection_lock.json").read_text(encoding="utf-8")
+    )
+    old_style["frozen_settings"] = {"fixed_offset": 1}
+    atomic_json(old_style_path, old_style)
+    assert load_relation_locks(old_style_path).source_kind == "legacy_object_only"
+
+
+@pytest.mark.parametrize("corruption", ["missing", "duplicate", "mismatch", "stale"])
+def test_missing_duplicated_mismatched_or_stale_locks_fail_loudly(tmp_path, corruption):
+    source = _make_source(tmp_path)
+    build = derive_relation_selection_bundle(source, tmp_path / "derived")
+    broken = tmp_path / f"broken-{corruption}"
+    shutil.copytree(build.output_dir, broken)
+    manifest_path = broken / "relation_selection_bundle.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if corruption == "missing":
+        (broken / "locks/subject_to_verb.json").unlink()
+    elif corruption == "duplicate":
+        manifest["relations"]["subject_to_verb"]["lock"] = manifest["relations"][
+            "object_to_verb"
+        ]["lock"]
+        atomic_json(manifest_path, manifest)
+    elif corruption == "mismatch":
+        lock_path = broken / "locks/subject_to_verb.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        lock["relation"] = "object_to_verb"
+        atomic_json(lock_path, lock)
+    else:
+        manifest["schema_version"] = "stale-v1"
+        atomic_json(manifest_path, manifest)
+
+    with pytest.raises((ArtifactError, FileNotFoundError)):
+        load_relation_locks(broken)
