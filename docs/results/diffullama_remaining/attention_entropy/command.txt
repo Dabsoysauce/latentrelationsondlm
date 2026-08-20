@@ -1,0 +1,1 @@
+dlmrel run --model configs/models/diffullama_7b.yaml --dataset configs/datasets/ewt.yaml --experiment configs/experiments/attention_entropy.yaml --run-id diffullama-ewt-entropy-v1

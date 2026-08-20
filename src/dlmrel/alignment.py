@@ -102,9 +102,14 @@ def token_offsets_with_diagnostics(
     """Return offsets and a structured audit reason."""
     fast = getattr(tokenizer, "_dlmrel_fast_offsets", None)
     if fast is None:
+        # A slow tokenizer does not necessarily raise on return_offsets_mapping.
+        # Some silently drop the argument and return an encoding without the
+        # key, so probing for an exception alone records a false positive and
+        # the next real call dies with KeyError: 'offset_mapping'. Confirm the
+        # key actually came back.
         try:
-            tokenizer("probe", return_offsets_mapping=True)
-            fast = True
+            probe = tokenizer("probe", return_offsets_mapping=True)
+            fast = "offset_mapping" in probe
         except Exception:  # noqa: BLE001
             fast = False
         tokenizer._dlmrel_fast_offsets = fast

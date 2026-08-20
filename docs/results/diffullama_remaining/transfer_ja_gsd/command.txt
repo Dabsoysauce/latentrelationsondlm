@@ -1,0 +1,1 @@
+dlmrel run --model configs/models/diffullama_7b.yaml --dataset configs/datasets/ja_gsd.yaml --experiment configs/experiments/external_transfer.yaml --run-id diffullama-ja-transfer-v1 --selection-lock docs/results/diffullama_confirmatory/selection_lock.json

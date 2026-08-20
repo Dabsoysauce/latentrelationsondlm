@@ -70,3 +70,30 @@ def test_bos_shift(include_bos, expected):
     spans = find_char_spans("word", ["word"])
     aligned = align_words_to_tokens("word", spans, tok, include_bos=include_bos)
     assert aligned[0] == expected
+
+
+class _SlowTokenizerDroppingOffsets:
+    """A tokenizer that ignores return_offsets_mapping instead of raising.
+
+    This is the shape that matters: probing for an exception alone marks it
+    fast, and the next real call dies with KeyError: 'offset_mapping'.
+    """
+
+    def __init__(self):
+        self.vocabulary = {}
+
+    def __call__(self, text, add_special_tokens=True, return_offsets_mapping=False):
+        pieces = text.split()
+        return {"input_ids": list(range(len(pieces)))}
+
+    def decode(self, ids, clean_up_tokenization_spaces=True):
+        return " ".join(str(i) for i in ids)
+
+
+def test_slow_tokenizer_that_drops_offsets_is_not_treated_as_fast():
+    from dlmrel.alignment import token_offsets_with_diagnostics
+
+    tokenizer = _SlowTokenizerDroppingOffsets()
+    _, diagnostics = token_offsets_with_diagnostics(tokenizer, "the cat sat")
+    assert tokenizer._dlmrel_fast_offsets is False
+    assert diagnostics.method == "cumulative_decode"

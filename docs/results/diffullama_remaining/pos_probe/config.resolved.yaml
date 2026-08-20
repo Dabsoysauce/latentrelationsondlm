@@ -1,0 +1,60 @@
+schema_version: dlmrel-config-v2
+track: exploratory_extensions
+model:
+  id: diffullama_7b
+  name: diffusionfamily/diffullama
+  family: diffullama
+  revision: 31b22850c7b397d6948ea04076099b9ff7110adc
+  tokenizer_revision: 31b22850c7b397d6948ea04076099b9ff7110adc
+  remote_code_revision: c17e897f6476c174b4623da594e4c65554f1613d
+  dtype: bfloat16
+  device: cuda
+  attn_implementation: eager
+  capabilities:
+    logits: true
+    hidden_states: true
+    attentions: true
+dataset:
+  id: ewt
+  treebank: UD_English-EWT
+  language: en
+  release: '2.15'
+  repository: https://github.com/UniversalDependencies/UD_English-EWT
+  revision: 4dc8e10cf32352e11ab2c46e024b19853b91546e
+  checksums:
+    train: sha256:a049fc40822e21593ff89ccd0a4b081443f09fae71b61f813c624aa598f6c566
+    dev: sha256:14a82ce2c4c4648c3e7c4efc76872c85c5f4c39643fcb7f9c91a45a58157a270
+    test: sha256:0612e45914359e4b36d187ef2bfeaf66fc8933210925be985c5fbf6a9e311036
+  cache_dir: data/ud
+  select_from: train
+  dev_from: dev
+  test_from: test
+  n_select: 4000
+  n_dev: 1000
+  n_test: 1000
+  seed: 42
+  dedupe_normalized_text: true
+  min_words: 4
+  max_words: null
+experiment:
+  id: masked_pos_probe
+  type: pos_probe
+  steps: 64
+  normalized_progress:
+  - 0.5
+  seeds:
+  - 42
+  - 43
+  - 44
+  scoring:
+    attender_rows: mean
+    receiver_span: sum
+    top_k: 5
+    primary_relation: object_to_verb
+    primary_visibility: both_masked
+runtime:
+  results_root: results
+  run_id: diffullama-ewt-posprobe-v1
+  resume: false
+  dry_run: false
+  selection_lock: null

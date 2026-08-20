@@ -1,0 +1,14 @@
+{
+  "completion_status": "complete",
+  "config_hash": "adb49ad0cb083ac58378c854fd1e1f421881f1011023f9e03236d0dda48a9f5e",
+  "ended_at": "2026-08-18T10:17:58.714346+00:00",
+  "last_resumed_at": "2026-08-18T10:16:26.064512+00:00",
+  "manifest_hashes_hash": "c474d2a5306c9ee7274131068fc9475d7406d4199853f957cc43f1dca57fec8f",
+  "model_revision": "31b22850c7b397d6948ea04076099b9ff7110adc",
+  "remote_code_revision": "c17e897f6476c174b4623da594e4c65554f1613d",
+  "schema_version": "dlmrel-run-v1",
+  "scientific_config_hash": "adb49ad0cb083ac58378c854fd1e1f421881f1011023f9e03236d0dda48a9f5e",
+  "selection_lock_hash": "8b560bd4efeb572fcf263c4a4e7672f62f38962b986bddf6bb47a5b49cb2f45b",
+  "started_at": "2026-08-18T10:16:26.064494+00:00",
+  "tokenizer_revision": "31b22850c7b397d6948ea04076099b9ff7110adc"
+}
