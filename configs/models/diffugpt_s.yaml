@@ -1,0 +1,13 @@
+id: diffugpt_s
+name: diffusionfamily/diffugpt-s
+family: diffugpt
+revision: 391d9850148c0beda355a8874bea958a40164c74
+tokenizer_revision: 391d9850148c0beda355a8874bea958a40164c74
+remote_code_revision: c17e897f6476c174b4623da594e4c65554f1613d
+dtype: float32
+device: cpu
+attn_implementation: eager
+capabilities:
+  logits: true
+  hidden_states: true
+  attentions: true

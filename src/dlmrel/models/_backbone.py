@@ -69,20 +69,23 @@ def _is_wrapper_checkpoint(name: str, revision: str | None = None) -> bool:
         return False
 
 
-def _wrapper_key_map(key: str) -> str | None:
+def _wrapper_key_map(key: str, body: str, embed_target: str) -> str | None:
     if key.startswith("denoise_model."):
-        return f"model.{key[len('denoise_model.') :]}"
+        return f"{body}.{key[len('denoise_model.') :]}"
     if key == "embed_tokens.weight":
-        return "model.embed_tokens.weight"
+        return embed_target
     if key.startswith("lm_head."):
         return key
     return None
 
 
-def _load_wrapper_checkpoint(cls, name: str, hf_config, dtype, revision: str):
+def _load_wrapper_checkpoint(
+    cls, name: str, hf_config, dtype, revision: str, body: str = "model", embed_target: str | None = None
+):
     from huggingface_hub import hf_hub_download, list_repo_files
     from safetensors.torch import load_file
 
+    embed_target = embed_target or f"{body}.embed_tokens.weight"
     backbone = cls(hf_config)
     state: dict[str, torch.Tensor] = {}
     for shard in [file for file in list_repo_files(name, revision=revision) if file.endswith(".safetensors")]:
@@ -90,7 +93,7 @@ def _load_wrapper_checkpoint(cls, name: str, hf_config, dtype, revision: str):
 
     remapped, dropped = {}, []
     for key, value in state.items():
-        target = _wrapper_key_map(key)
+        target = _wrapper_key_map(key, body, embed_target)
         if target is None:
             dropped.append(key)
         else:
@@ -127,10 +130,12 @@ def _assert_pretrained_weights_loaded(backbone, name: str, revision: str | None 
     )
 
 
-def load_backbone(cls, name: str, hf_config, dtype, **extra):
+def load_backbone(
+    cls, name: str, hf_config, dtype, body: str = "model", embed_target: str | None = None, **extra
+):
     revision = extra.get("revision")
     if _is_wrapper_checkpoint(name, revision):
-        return _load_wrapper_checkpoint(cls, name, hf_config, dtype, revision)
+        return _load_wrapper_checkpoint(cls, name, hf_config, dtype, revision, body, embed_target)
 
     attempts = [
         {"dtype": dtype, "attn_implementation": hf_config._attn_implementation},
@@ -202,7 +207,14 @@ class WrappedAdapter(ModelAdapter, torch.nn.Module):
         return None, out.attentions
 
 
-def load_diffullama(model_cfg: dict, adapter_cls):
+def load_wrapped_family(
+    model_cfg: dict,
+    adapter_cls,
+    backbone_cls,
+    body: str,
+    embed_target: str,
+    device_map: str | None = None,
+):
     code_revision = model_cfg["remote_code_revision"]
     ensure_diffullama_repo(code_revision)
     from transformers import AutoConfig, AutoTokenizer
@@ -218,11 +230,11 @@ def load_diffullama(model_cfg: dict, adapter_cls):
     hf_config._attn_implementation = attn
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, revision=tokenizer_revision)
 
-    import transformers
-
-    backbone_cls = transformers.LlamaForCausalLM
+    extra = {"revision": revision}
+    if device_map:
+        extra["device_map"] = device_map
     backbone = load_backbone(
-        backbone_cls, checkpoint, hf_config, dtype, revision=revision, device_map="auto"
+        backbone_cls, checkpoint, hf_config, dtype, body=body, embed_target=embed_target, **extra
     )
 
     try:
@@ -256,3 +268,28 @@ def load_diffullama(model_cfg: dict, adapter_cls):
         "bos_token_id": tokenizer.bos_token_id,
     }
     return adapter, tokenizer, meta
+
+
+def load_diffullama(model_cfg: dict, adapter_cls):
+    import transformers
+
+    return load_wrapped_family(
+        model_cfg,
+        adapter_cls,
+        transformers.LlamaForCausalLM,
+        body="model",
+        embed_target="model.embed_tokens.weight",
+        device_map="auto",
+    )
+
+
+def load_diffugpt(model_cfg: dict, adapter_cls):
+    import transformers
+
+    return load_wrapped_family(
+        model_cfg,
+        adapter_cls,
+        transformers.GPT2LMHeadModel,
+        body="transformer",
+        embed_target="transformer.wte.weight",
+    )
