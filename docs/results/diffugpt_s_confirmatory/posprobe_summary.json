@@ -1,0 +1,32 @@
+{
+  "capabilities": {
+    "attentions": true,
+    "hidden_states": true,
+    "logits": true
+  },
+  "completion_status": "complete",
+  "model_metadata": {
+    "bos_token_id": 50256,
+    "capabilities": {
+      "attentions": true,
+      "hidden_states": true,
+      "logits": true
+    },
+    "checkpoint": "diffusionfamily/diffugpt-s",
+    "hidden_size": 768,
+    "mask_token_id": 10541,
+    "n_heads": 12,
+    "n_layers": 12,
+    "remote_code_revision": "c17e897f6476c174b4623da594e4c65554f1613d",
+    "revision": "391d9850148c0beda355a8874bea958a40164c74",
+    "tokenizer_revision": "391d9850148c0beda355a8874bea958a40164c74"
+  },
+  "n_seeds": 3,
+  "n_test_positions": 21146,
+  "schema_version": "dlmrel-run-v1",
+  "selected_c_by_seed": {
+    "42": 0.01,
+    "43": 0.01,
+    "44": 0.01
+  }
+}

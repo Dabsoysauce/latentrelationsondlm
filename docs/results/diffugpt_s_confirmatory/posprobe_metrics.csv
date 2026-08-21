@@ -1,0 +1,2 @@
+n_seeds,accuracy,accuracy_seed_std,macro_f1,macro_f1_seed_std,majority_accuracy,majority_accuracy_seed_std,lexical_accuracy,lexical_accuracy_seed_std,shuffled_accuracy,shuffled_accuracy_seed_std,random_feature_accuracy,random_feature_accuracy_seed_std,n_test_positions,n_test_sentences
+3,0.42824812651632965,0.06312180307793688,0.3002570024925054,0.05748458179621138,0.16099107353084463,0.003633937934372596,0.8566124649768209,0.005744631954332817,0.13727287110503125,0.006090838426836595,0.12661866946934652,0.005506917598166634,21146,732
