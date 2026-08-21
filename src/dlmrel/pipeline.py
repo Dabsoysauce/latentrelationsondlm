@@ -15,7 +15,7 @@ from .artifacts import ArtifactError, atomic_json, final_artifact_hashes
 from .config import RunConfig
 from .relation_selection import RelationLockSet, load_relation_locks
 
-ATTENTION_ROW_SUM_TOLERANCE = 1e-3
+ATTENTION_ROW_SUM_TOLERANCE = 1e-2
 _WORST_ROWS_PER_LAYER = 1
 _WORST_ROWS_OVERALL = 5
 

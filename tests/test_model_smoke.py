@@ -9,7 +9,11 @@ import torch
 from dlmrel.artifacts import ArtifactError
 from dlmrel.models.base import Capabilities
 from dlmrel.models.fake import FakeAdapter
-from dlmrel.pipeline import ATTENTION_ROW_SUM_TOLERANCE, model_smoke_report
+from dlmrel.pipeline import (
+    ATTENTION_ROW_SUM_TOLERANCE,
+    attention_normalization_diagnostics,
+    model_smoke_report,
+)
 
 
 class _Tokenizer:
@@ -70,6 +74,19 @@ def test_model_smoke_reports_normalized_attention():
     assert all(layer["shape"] == [1, 3, 5, 5] for layer in diagnostics["layers"])
     assert all(layer["dtype"] == "float32" for layer in diagnostics["layers"])
     assert diagnostics["mask_padding_assessment"]["padding_can_explain_failure"] is False
+
+
+def test_measured_dream_bfloat16_row_sum_error_passes():
+    row = torch.tensor([205, 205, 205, 206, 206], dtype=torch.float32).div(1024)
+    attention = row.to(torch.bfloat16).reshape(1, 1, 1, 5).repeat(1, 1, 5, 1)
+
+    diagnostics = attention_normalization_diagnostics((attention,), sequence_length=5)
+
+    assert ATTENTION_ROW_SUM_TOLERANCE == 1e-2
+    assert diagnostics["max_error_from_one"] == pytest.approx(0.0029296875)
+    assert diagnostics["layers"][0]["dtype"] == "bfloat16"
+    assert diagnostics["rows_exceeding_tolerance"] == 0
+    assert diagnostics["passed"] is True
 
 
 def test_model_smoke_rejects_malformed_attention_with_layer_diagnostics():

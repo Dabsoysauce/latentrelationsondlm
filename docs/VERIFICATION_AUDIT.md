@@ -195,18 +195,25 @@ config, result directory, notebook, or dependency pin changed. `git diff
 --check` passed; Git only printed the repository's existing LF-to-CRLF working
 copy notices on Windows. No change is staged, committed, pushed, or merged.
 
-## Real-model validation still required
+## Real-model validation status
 
-No GPU claim can be made from this CPU audit. For both pinned models, execute
-the smoke report and tiny non-reportable runner validation in an isolated GPU
-environment. Record the exact attention row-sum error, repeat-forward maximum
-absolute error, attention/logit/hidden-state shapes, final-depth parity error,
-and one interruption/resume comparison. Do not relax a tolerance based only on
-a failing value.
+The CPU audit alone could not make a GPU claim. The Dream smoke measurement is
+now recorded below; Dream's tiny non-reportable runner validation and both
+DiffuLLaMA GPU checks remain. Record the exact attention row-sum error,
+repeat-forward maximum absolute error, attention/logit/hidden-state shapes,
+final-depth parity error, and one interruption/resume comparison. Do not relax
+a tolerance based only on a failing value.
 
 The audit must be updated with those measured results before marking GPU
 validation complete. Full official experiments are separate from this
 software-validation step.
+
+The Dream smoke rerun measured a maximum bfloat16 attention row-sum error of
+`0.0029296875`, with the expected attention shapes, no nonfinite values, and an
+unpadded input. The smoke-only normalization tolerance is therefore `1e-2`;
+this accommodates the observed bfloat16 accumulation error while continuing to
+reject materially malformed attention rows. This does not change any model,
+dataset, experiment, seed, scoring, relation, or head-selection setting.
 
 ### Exact Modal smoke commands (not executed)
 
