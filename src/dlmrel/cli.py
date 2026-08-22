@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shlex
 import sys
 from dataclasses import asdict, replace
@@ -13,9 +14,23 @@ from pathlib import Path
 import torch
 import yaml
 
-from .artifacts import ArtifactError, atomic_json, initialize_run, run_directory, validate_run
-from .config import ConfigError, DatasetConfig, RunConfig, RuntimeConfig, _strict_dataclass
-from .data import load_audit, manifest_root, prepare_manifests
+from .artifacts import (
+    ArtifactError,
+    atomic_json,
+    canonical_hash,
+    initialize_run,
+    run_directory,
+    validate_run,
+)
+from .config import (
+    ConfigError,
+    DatasetConfig,
+    RunConfig,
+    RuntimeConfig,
+    _strict_dataclass,
+    is_paper_experiment,
+)
+from .data import load_audit, load_paper_manifest_refs, manifest_root, prepare_manifests
 from .evaluation.compare_models import compare_runs
 from .fake_run import run_fake
 from .head_search_recovery import (
@@ -48,6 +63,9 @@ def resolve_run(args) -> RunConfig:
         resume=args.resume,
         dry_run=args.dry_run,
         selection_lock=args.selection_lock,
+        timestep_batch_size=args.timestep_batch_size,
+        export_attention_cache=args.export_attention_cache,
+        attention_cache=args.attention_cache,
     )
     return RunConfig.load_files(args.model, args.dataset, args.experiment, runtime=runtime)
 
@@ -121,10 +139,26 @@ def cmd_run(args) -> None:
         )
         return
 
-    audit = load_audit(cfg.dataset)
+    if is_paper_experiment(cfg.experiment):
+        roles = paper_manifest_roles(cfg)
+        try:
+            audit = load_paper_manifest_refs(cfg.dataset, roles)
+        except ArtifactError:
+            if cfg.model.family != "fake":
+                raise
+            audit = {
+                "manifest_hashes": {
+                    role: canonical_hash(
+                        {"fake_cpu_only": True, "dataset": cfg.dataset.id, "role": role}
+                    )
+                    for role in roles
+                }
+            }
+    else:
+        audit = load_audit(cfg.dataset)
     command = " ".join(shlex.quote(piece) for piece in ["dlmrel", *sys.argv[1:]])
     initialize_run(target, cfg.to_dict(), command, audit["manifest_hashes"], resume=cfg.runtime.resume)
-    if cfg.model.family == "fake":
+    if cfg.model.family == "fake" and not is_paper_experiment(cfg.experiment):
         run_fake(cfg, target)
     else:
         run_real(cfg, target, audit["manifest_hashes"])
@@ -135,18 +169,54 @@ def cmd_run(args) -> None:
 
 
 def work_estimate(cfg: RunConfig) -> dict:
-    audit = manifest_root(cfg.dataset) / "audit.json"
-    counts = json.loads(audit.read_text(encoding="utf-8")).get("counts", {}) if audit.exists() else {}
+    if is_paper_experiment(cfg.experiment):
+        counts = {}
+        for role in paper_manifest_roles(cfg):
+            path = manifest_root(cfg.dataset) / f"{role}.csv"
+            if path.is_file():
+                with path.open(encoding="utf-8") as stream:
+                    counts[role] = max(sum(1 for _line in stream) - 1, 0)
+    else:
+        audit = manifest_root(cfg.dataset) / "audit.json"
+        counts = (
+            json.loads(audit.read_text(encoding="utf-8")).get("counts", {})
+            if audit.exists()
+            else {}
+        )
     sentences = sum(counts.values()) if counts else "unknown_until_prepare"
     steps = len(cfg.experiment.normalized_progress)
+    logical_forward_states = (
+        sentences if isinstance(sentences, str) else sentences * steps * len(cfg.experiment.seeds)
+    )
+    model_forward_calls = logical_forward_states
+    if isinstance(sentences, int) and cfg.experiment.type in {
+        "relation_head_receiver_prediction_over_diffusion_time",
+        "attention_entropy",
+        "multilingual_relation_head_transfer",
+    }:
+        size = cfg.runtime.timestep_batch_size
+        per_sentence = math.ceil(64 / size) + 2 * math.ceil(62 / size)
+        model_forward_calls = 0 if cfg.runtime.attention_cache else sentences * per_sentence
     return {
         "sentences": sentences,
         "trajectory_points": steps,
         "seeds": len(cfg.experiment.seeds),
-        "estimated_forward_passes": (
-            sentences if isinstance(sentences, str) else sentences * steps * len(cfg.experiment.seeds)
-        ),
+        "estimated_forward_passes": logical_forward_states,
+        "logical_forward_states": logical_forward_states,
+        "timestep_batch_size": cfg.runtime.timestep_batch_size,
+        "estimated_model_forward_calls": model_forward_calls,
+        "attention_cache_reused": bool(cfg.runtime.attention_cache),
     }
+
+
+def paper_manifest_roles(cfg: RunConfig) -> tuple[str, ...]:
+    """Return the only UD roles a corrected runner may place in its identity."""
+    if cfg.experiment.type in {
+        "relation_head_receiver_prediction",
+        "pos_token_class_linear_probes",
+    }:
+        return ("select", "test")
+    return ("test",)
 
 
 def cmd_validate(args) -> None:
@@ -159,6 +229,42 @@ def cmd_validate(args) -> None:
 def cmd_compare(args) -> None:
     output, common = compare_runs(args.runs, args.output)
     print(f"wrote {output} and {common}")
+
+
+def cmd_validate_selection_locks(args) -> None:
+    cfg = RunConfig.load_files(args.model, args.dataset, args.experiment)
+    if not is_paper_experiment(cfg.experiment):
+        raise ConfigError("selection-lock validation requires a corrected paper config")
+    from .experiments.paper_relation import load_paper_locks
+
+    locks = load_paper_locks(args.selection_lock, cfg)
+    print(
+        json.dumps(
+            {
+                "valid": True,
+                "source": str(locks.source),
+                "model": cfg.model.id,
+                "model_revision": cfg.model.revision,
+                "relations": {
+                    relation: {"layer": lock.layer, "head": lock.head}
+                    for relation, lock in locks.locks.items()
+                },
+            },
+            indent=2,
+        )
+    )
+
+
+def cmd_summarize(args) -> None:
+    run_dir = Path(args.run_dir)
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    payload = {"summary": summary}
+    metrics = run_dir / "metrics.csv"
+    if metrics.is_file():
+        import pandas as pd
+
+        payload["metrics_preview"] = pd.read_csv(metrics, nrows=args.rows).to_dict("records")
+    print(json.dumps(payload, indent=2, default=str))
 
 
 def cmd_derive_relation_locks(args) -> None:
@@ -247,7 +353,9 @@ def cmd_finalize_head_search(args) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="dlmrel", description="Rigorous DLM relation analysis")
+    parser = argparse.ArgumentParser(
+        prog="dlmrel", description="Restored old-paper experiments for diffusion language models"
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     prepare = commands.add_parser("prepare", help="verify one treebank and write official manifests")
@@ -271,6 +379,21 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--run-id")
     run.add_argument("--resume", action="store_true")
     run.add_argument("--selection-lock")
+    run.add_argument(
+        "--timestep-batch-size",
+        type=int,
+        default=8,
+        help="number of equal-length trajectory states forwarded together",
+    )
+    run.add_argument(
+        "--export-attention-cache",
+        action="store_true",
+        help="save entropy rows while running the English relation trajectory",
+    )
+    run.add_argument(
+        "--attention-cache",
+        help="completed English time-trajectory run whose entropy cache should be reused",
+    )
     run.add_argument("--dry-run", action="store_true")
     run.set_defaults(func=cmd_run)
 
@@ -283,6 +406,26 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--output", required=True)
     compare.set_defaults(func=cmd_compare)
 
+    validate_locks = commands.add_parser(
+        "validate-selection-locks",
+        help="validate all six model-specific, selection-only paper locks",
+    )
+    validate_locks.add_argument("--model", required=True)
+    validate_locks.add_argument("--dataset", default="configs/datasets/ewt.yaml")
+    validate_locks.add_argument(
+        "--experiment",
+        default="configs/experiments/relation_head_receiver_prediction.yaml",
+    )
+    validate_locks.add_argument("--selection-lock", required=True)
+    validate_locks.set_defaults(func=cmd_validate_selection_locks)
+
+    summarize = commands.add_parser(
+        "summarize", help="print summary.json and a small metrics preview without opening Parquet"
+    )
+    summarize.add_argument("--run-dir", required=True)
+    summarize.add_argument("--rows", type=int, default=20)
+    summarize.set_defaults(func=cmd_summarize)
+
     derive = commands.add_parser(
         "derive-relation-locks",
         help="derive six relation locks from a completed head-search run without inference",
@@ -293,14 +436,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     recover_grid = commands.add_parser(
         "recover-head-search-test-grid",
-        help="score only missing all-head EWT test evidence for an existing run",
+        help="LEGACY ONLY: recover old permutation-era all-head test evidence",
     )
     recover_grid.add_argument("--run-dir", required=True)
     recover_grid.set_defaults(func=cmd_recover_head_search_test_grid)
 
     finalize = commands.add_parser(
         "finalize-head-search",
-        help="finish selection-aware inference and metrics from saved evidence on CPU",
+        help="LEGACY ONLY: finish old dev/permutation-era results",
     )
     finalize.add_argument("--run-dir", required=True)
     finalize.set_defaults(func=cmd_finalize_head_search)

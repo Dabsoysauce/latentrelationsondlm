@@ -1,0 +1,19 @@
+id: direct_logit_attribution
+type: direct_logit_attribution
+track: exploratory_extensions
+steps: 64
+normalized_progress: [0.31746031746031744, 0.47619047619047616, 0.6349206349206349]
+seeds: [42, 43, 44]
+scoring:
+  attender_rows: last
+  receiver_span: source_argmax
+  top_k: 1
+  primary_relation: object_to_verb
+  primary_visibility: both_visible
+settings:
+  diagnostic_timesteps: [20, 30, 40]
+  target: masked_gold_receiver_subtokens
+  final_norm: model_final_norm
+  unembedding: model_lm_head
+  controls: matched_low_relation_heads
+  require_exact_output_projection_slice: true

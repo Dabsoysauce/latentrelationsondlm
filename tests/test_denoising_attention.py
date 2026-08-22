@@ -1,12 +1,23 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 
 from dlmrel.artifacts import ArtifactError
-from dlmrel.diffusion import endpoint_visibility, receiver_span_scores, state_at_time
+from dlmrel.diffusion import (
+    attention_batches_for_states,
+    endpoint_visibility,
+    receiver_span_scores,
+    state_at_time,
+    teacher_forced_trajectory,
+)
 from dlmrel.experiments import shared
+from dlmrel.experiments.paper_entropy import entropy_trajectory_chunk
+from dlmrel.experiments.paper_relation import score_time_and_entropy_chunk
+from dlmrel.models.fake import FakeAdapter
+from dlmrel.paper_protocol import map_relative_depths
 from dlmrel.relations import Example, RelationInstance
 
 
@@ -19,6 +30,21 @@ class TinyTokenizer:
 
     def decode(self, token_ids):
         return str(token_ids[0])
+
+
+class TrackingFakeAdapter(FakeAdapter):
+    def __init__(self):
+        super().__init__()
+        self.attention_only_calls = 0
+        self.logit_attention_calls = 0
+
+    def forward_attentions_only(self, input_ids):
+        self.attention_only_calls += 1
+        return super().forward_attentions_only(input_ids)
+
+    def forward_attentions(self, input_ids, output_hidden_states=False):
+        self.logit_attention_calls += 1
+        return super().forward_attentions(input_ids, output_hidden_states)
 
 
 def test_frozen_denoising_schedule_endpoints_monotonicity_and_rng_reset():
@@ -45,6 +71,67 @@ def test_frozen_denoising_schedule_endpoints_monotonicity_and_rng_reset():
     # The frozen implementation resets RNG per sentence, so equal token lengths
     # receive equal visibility paths even if sentence content differs.
     assert state_at_time(model, tokenizer, "0100", 32, seed=42).is_visible == repeated.is_visible
+
+
+def test_trajectory_attention_microbatch_matches_single_state_rows_without_logits():
+    tokenizer = TinyTokenizer()
+    example = SimpleNamespace(text="6", sentence_id="s", source="ewt")
+    depths = map_relative_depths(2)
+    single = TrackingFakeAdapter()
+    batched = TrackingFakeAdapter()
+
+    expected = entropy_trajectory_chunk(
+        single, tokenizer, [example], seed=43, depth_rows=depths, batch_size=1
+    )
+    actual = entropy_trajectory_chunk(
+        batched, tokenizer, [example], seed=43, depth_rows=depths, batch_size=8
+    )
+
+    pd.testing.assert_frame_equal(actual, expected)
+    assert set(actual["timestep"]) == set(range(1, 63))
+    assert single.attention_only_calls == 62
+    assert batched.attention_only_calls == 8
+    assert single.logit_attention_calls == batched.logit_attention_calls == 0
+
+
+def test_attention_batch_helper_preserves_state_order_and_batch_axis():
+    adapter = TrackingFakeAdapter()
+    states = teacher_forced_trajectory(adapter, TinyTokenizer(), "4", seed=42)
+    batches = list(attention_batches_for_states(adapter, states[:9], batch_size=4))
+
+    assert [start for start, _states, _attention in batches] == [0, 4, 8]
+    assert [len(current) for _start, current, _attention in batches] == [4, 4, 1]
+    assert [attention[0].shape[0] for _start, _current, attention in batches] == [4, 4, 1]
+
+
+def test_batched_relation_and_shared_entropy_outputs_match_single_state_execution():
+    example = _scoring_example()
+    example.text = "3"
+    lock = SimpleNamespace(layer=0, head=0)
+    locks = SimpleNamespace(heads={(0, 0)}, resolve=lambda _relation: lock)
+    depths = map_relative_depths(2)
+
+    expected = score_time_and_entropy_chunk(
+        TrackingFakeAdapter(),
+        TinyTokenizer(),
+        [example],
+        seed=43,
+        locks=locks,
+        batch_size=1,
+        depth_rows=depths,
+    )
+    actual = score_time_and_entropy_chunk(
+        TrackingFakeAdapter(),
+        TinyTokenizer(),
+        [example],
+        seed=43,
+        locks=locks,
+        batch_size=8,
+        depth_rows=depths,
+    )
+
+    pd.testing.assert_frame_equal(actual[0], expected[0])
+    pd.testing.assert_frame_equal(actual[1], expected[1])
 
 
 def test_denoising_rejects_invalid_time_and_whole_word_visibility_needs_all_subtokens():

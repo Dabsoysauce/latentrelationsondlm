@@ -200,5 +200,44 @@ def load_audit(dataset: DatasetConfig) -> dict[str, Any]:
     return audit
 
 
+def load_paper_manifest_refs(dataset: DatasetConfig, roles: tuple[str, ...]) -> dict[str, Any]:
+    """Verify only select/test manifests for the corrected protocol.
+
+    This intentionally never opens ``audit.json``, the official development
+    file, or ``dev.csv``.  Development metadata may remain on disk for legacy
+    provenance, but it cannot enter a corrected run identity.
+    """
+    if not roles or not set(roles).issubset({"select", "test"}):
+        raise ValueError("paper manifest roles must be a nonempty select/test subset")
+    root = manifest_root(dataset)
+    hashes: dict[str, str] = {}
+    counts: dict[str, int] = {}
+    expected_splits = {"select": "train", "test": "test"}
+    required_columns = {item.name for item in ManifestRow.__dataclass_fields__.values()}
+    for role in roles:
+        path = root / f"{role}.csv"
+        if not path.is_file():
+            raise ArtifactError(f"missing prepared manifest: {path}")
+        frame = pd.read_csv(path, keep_default_na=False)
+        if set(frame) != required_columns:
+            raise ArtifactError(f"{role} manifest schema fields do not match")
+        if set(frame["original_split"]) != {expected_splits[role]}:
+            raise ArtifactError(f"{role} manifest violates its official boundary")
+        rows = []
+        for raw in frame.to_dict("records"):
+            raw["n_words"] = int(raw["n_words"])
+            rows.append(ManifestRow(**raw))
+        hashes[role] = manifest_hash(rows)
+        counts[role] = len(rows)
+    return {
+        "schema_version": "dlmrel-paper-manifest-refs-v1",
+        "dataset": dataset.id,
+        "roles": list(roles),
+        "manifest_hashes": hashes,
+        "counts": counts,
+        "development_opened": False,
+    }
+
+
 def _exclusion(row, role: str, reason: str) -> dict[str, Any]:
     return {"sentence_id": str(row.sentence_id), "instance_id": None, "role": role, "reason": reason}

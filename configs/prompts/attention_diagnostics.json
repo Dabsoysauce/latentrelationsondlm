@@ -1,0 +1,11 @@
+{
+  "schema_version": "dlmrel-attention-diagnostics-v1",
+  "source": "preserved_diffugpt_attention_head_trajectories",
+  "sentences": [
+    "Today is a wonderful day,",
+    "The student solved the difficult problem correctly.",
+    "The doctor gave the patient a careful diagnosis.",
+    "The cat sat quietly on the warm windowsill.",
+    "She carefully painted the old wooden fence yesterday."
+  ]
+}

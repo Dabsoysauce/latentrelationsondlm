@@ -1,15 +1,26 @@
 # Latent relations in diffusion language models
 
-This repository reruns the Dream-7B and DiffuLLaMA-7B experiments with one
-auditable protocol. The active datasets are English EWT, German GSD, and
-Japanese GSD. The active analyses are head search, locked transfer, time
-curves, attention entropy, logit lens, and masked POS probing.
+This repository runs scaled versions of the original DiffuGPT paper experiments
+on Dream-7B and DiffuLLaMA-7B. The corrected active protocol uses English EWT
+selection/test only, all six predefined dependency relations, seeds
+`[42, 43, 44]`, and model-relative early/middle/late depths.
 
-The earlier Dream and DiffuLLaMA outputs are preliminary because they were
-produced before official split preservation, select/dev/test head locking, and
-the current controls and provenance records. They are preserved outside the
-active branch and will be rerun; they are not used as final evidence. DiffuGPT
-belongs to older work and is not part of this rerun.
+The active experiment names are:
+
+1. Relation-Head Receiver Prediction
+2. Relation-Head Receiver Prediction over Diffusion Time
+3. Attention Entropy
+4. POS/Token-Class Linear Probes
+5. Final-Token Prediction by Layer
+6. Prediction Before Unmasking: Timing Analysis
+7. Direct Logit Attribution
+8. Matched Relation-Head Ablation
+9. Attention Heatmaps and Trajectories
+10. Multilingual Relation-Head Transfer (new extension)
+
+Corrected runs do not read development data, run permutations, or apply Holm
+correction. Legacy modules and completed result directories remain available
+only for provenance and are not reachable from the corrected configurations.
 
 ## Install and verify
 
@@ -20,44 +31,49 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m ruff check .
 ```
 
-Dream and DiffuLLaMA require separate GPU environments because they use
-different pinned Transformers versions. See [RUNNING.md](docs/RUNNING.md).
+Dream and DiffuLLaMA use separate pinned environments. The ready-to-run
+launchers are:
 
-## Commands
+- `notebooks/Dream_Paper_Experiments.ipynb`
+- `notebooks/DiffuLLaMA_Paper_Experiments.ipynb`
 
-```powershell
+## Core commands
+
+```bash
 dlmrel prepare --dataset configs/datasets/ewt.yaml
-dlmrel smoke-test --model configs/models/dream_7b.yaml
-dlmrel run --model configs/models/dream_7b.yaml --dataset configs/datasets/ewt.yaml --experiment configs/experiments/head_search.yaml --run-id dream-ewt-v1
-dlmrel derive-relation-locks --source-run <completed-head-search-run> --output <new-derived-directory>
-dlmrel validate --run-dir results/confirmatory_ewt/dream_7b/ewt/confirmatory_head_search/dream-ewt-v1
-dlmrel compare --runs <dream-run> <diffullama-run> --output results/comparison.csv
+
+dlmrel run \
+  --model configs/models/dream_7b.yaml \
+  --dataset configs/datasets/ewt.yaml \
+  --experiment configs/experiments/relation_head_receiver_prediction.yaml \
+  --results /path/to/results/dream \
+  --run-id paper-v1-dream-relation-selection \
+  --resume
+
+dlmrel validate-selection-locks \
+  --model configs/models/dream_7b.yaml \
+  --dataset configs/datasets/ewt.yaml \
+  --experiment configs/experiments/relation_head_receiver_prediction.yaml \
+  --selection-lock /path/to/relation-run/selection-locks
+
+dlmrel run \
+  --model configs/models/dream_7b.yaml \
+  --dataset configs/datasets/ewt.yaml \
+  --experiment configs/experiments/relation_head_receiver_prediction_over_diffusion_time.yaml \
+  --selection-lock /path/to/relation-run/selection-locks \
+  --results /path/to/results/dream \
+  --run-id paper-v1-dream-relation-time \
+  --timestep-batch-size 8 \
+  --export-attention-cache \
+  --resume
 ```
 
-Every real run records its exact model and dataset revisions, configuration,
-command, environment, manifests, exclusions, raw rows, seed summaries, and
-validation result. Completed runs cannot be silently overwritten.
+The 64-step attention runners microbatch equal-length states and do not compute
+unused vocabulary logits. The English relation-time run can checkpoint entropy
+rows from the same forwards; pass its completed run directory to Attention
+Entropy with `--attention-cache`. Ordinary sentence loops retain atomic
+300-sentence checkpoints, while the larger shared trajectory cache uses
+20-sentence chunks. Completed runs cannot be silently overwritten.
 
-Head search creates independent select/dev locks for the six canonical
-relations. `object_to_verb` remains the primary confirmatory relation; the
-other five are predefined secondaries. New test and downstream runs resolve
-each relation to its own lock, while legacy `selection_lock.json` files remain
-object-only. A completed legacy all-head select/dev run can be converted with
-`derive-relation-locks`; that command performs no model inference and does not
-read or modify locked-test artifacts. Existing object-head-only test rows are
-not six-relation results and cannot supply the corrected permutation test.
-
-## Repository map
-
-```text
-configs/      Three datasets, two research models, six analyses
-notebooks/    Colab GPU launcher
-src/dlmrel/   Data, model, experiment, statistics, and artifact code
-tests/        Methodological and software checks
-docs/         Protocol, running instructions, and verified status
-```
-
-- [Frozen protocol](docs/PROTOCOL.md)
-- [How to run the GPU experiments](docs/RUNNING.md)
-- [Guarded Modal execution and repair workflow](docs/MODAL.md)
-- [Implementation and preliminary-result status](docs/STATUS.md)
+See [the frozen protocol](docs/PROTOCOL.md), [GPU running
+instructions](docs/RUNNING.md), and [implementation status](docs/STATUS.md).

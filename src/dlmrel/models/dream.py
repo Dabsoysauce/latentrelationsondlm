@@ -15,6 +15,7 @@ _DTYPES = {
 
 class DreamAdapter(ModelAdapter, torch.nn.Module):
     mask_free = True
+    prediction_offset = 0
     capabilities = Capabilities(logits=True, hidden_states=True, attentions=True)
 
     def __init__(self, backbone, tokenizer, device: str):
@@ -44,9 +45,39 @@ class DreamAdapter(ModelAdapter, torch.nn.Module):
         )
         if getattr(out, "attentions", None) is None:
             raise RuntimeError("Dream returned no attention weights; load with attn_implementation='eager'.")
+        hidden = getattr(out, "last_hidden_state", None)
+        logits = getattr(out, "logits", None)
+        if logits is None and hidden is not None:
+            logits = self.get_logits(hidden)
         if output_hidden_states:
-            return None, out.attentions, out.hidden_states
-        return None, out.attentions
+            return logits, out.attentions, out.hidden_states
+        return logits, out.attentions
+
+    @torch.no_grad()
+    def forward_attentions_only(self, input_ids):
+        out = self.backbone(
+            input_ids=input_ids,
+            attention_mask=None,
+            output_attentions=True,
+            output_hidden_states=False,
+            return_dict=True,
+        )
+        if getattr(out, "attentions", None) is None:
+            raise RuntimeError("Dream returned no attention weights; load with attn_implementation='eager'.")
+        return out.attentions
+
+    @torch.no_grad()
+    def forward_features(self, input_ids):
+        out = self.backbone(
+            input_ids=input_ids,
+            attention_mask=None,
+            output_attentions=True,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        if getattr(out, "attentions", None) is None or getattr(out, "hidden_states", None) is None:
+            raise RuntimeError("Dream returned incomplete attention/hidden-state features")
+        return out.attentions, out.hidden_states
 
 
 def load(model_cfg: dict):

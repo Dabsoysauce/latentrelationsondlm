@@ -245,6 +245,43 @@ def test_existing_whole_seed_checkpoint_is_reused_and_annotated(tmp_path):
     assert metadata["sentence_end"] == len(examples)
 
 
+def test_paired_checkpoints_reuse_both_products_and_recompute_an_incomplete_pair(tmp_path):
+    run = tmp_path / "run"
+    initialize_run(run, _config(), "initial", {"test": "hash"})
+    examples = _examples(7)
+    first_identity = _identity()
+    second_identity = CheckpointIdentity(
+        stage="shared-entropy",
+        seed=42,
+        normalized_progress=-1.0,
+        timestep=-1,
+    )
+    calls = []
+
+    def compute(chunk, start):
+        calls.append(start)
+        first = _rows(chunk, start)
+        second = pd.DataFrame(
+            {"sentence_id": [example.sentence_id for example in chunk], "entropy": 0.5}
+        )
+        return first, second
+
+    store = SentenceCheckpointStore(run, chunk_size=3)
+    pairs = list(store.iter_paired_chunks(examples, first_identity, second_identity, compute))
+    assert calls == [0, 3, 6]
+    assert sum(len(first) for first, _second in pairs) == 7
+
+    calls.clear()
+    list(store.iter_paired_chunks(examples, first_identity, second_identity, compute))
+    assert calls == []
+
+    missing = run / "checkpoints" / second_identity.filename(3, 6)
+    missing.unlink()
+    calls.clear()
+    list(store.iter_paired_chunks(examples, first_identity, second_identity, compute))
+    assert calls == [3]
+
+
 def test_head_search_reuses_legacy_seed_42_and_43_files(tmp_path, monkeypatch):
     from dlmrel.experiments import shared
 

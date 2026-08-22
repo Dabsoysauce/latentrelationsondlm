@@ -1,0 +1,28 @@
+id: pos_token_class_linear_probes
+type: pos_token_class_linear_probes
+track: exploratory_extensions
+steps: 64
+normalized_progress: [0.0, 0.25, 0.5, 0.75]
+seeds: [42, 43, 44]
+scoring:
+  attender_rows: last
+  receiver_span: source_argmax
+  top_k: 1
+  primary_relation: object_to_verb
+  primary_visibility: both_visible
+settings:
+  relative_depths: {early: 0.2, middle: 0.5, late: 0.9}
+  mask_ratios: [1.0, 0.75, 0.5, 0.25]
+  label_inventory: [NOUN, VERB, ADJ, ADV, PREP, DET, PRON, CONJ]
+  tagger_backend: stanford_loglinear_external
+  automatic_tagger_release: '4.2.0'
+  automatic_tagger_archive_sha256: sha256:0e900017c052114d30e688a6218e229551c045f6abb6907ba8a52b2a119bcb23
+  historical_tagger_release_recovered: false
+  tagger_model_environment: STANFORD_POS_TAGGER_MODEL
+  tagger_jar_environment: STANFORD_POS_TAGGER_JAR
+  fixed_regularization_c: 1.0
+  max_iterations: 2000
+  masked_positions_only: true
+  word_labels_inherit_to_all_subtokens: true
+  head_level_probes: true
+  pos_head_ablation_comparison: true

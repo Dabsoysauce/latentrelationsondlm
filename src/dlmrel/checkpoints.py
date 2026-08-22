@@ -108,6 +108,51 @@ class SentenceCheckpointStore:
                 self._write_chunk(path, frame, expected)
             yield frame
 
+    def iter_paired_chunks(
+        self,
+        examples: Sequence[T],
+        first_identity: CheckpointIdentity,
+        second_identity: CheckpointIdentity,
+        compute: Callable[[Sequence[T], int], tuple[pd.DataFrame, pd.DataFrame]],
+    ):
+        """Atomically checkpoint two products created by the same GPU pass.
+
+        This lets the relation trajectory retain its ordinary resumable rows
+        while also storing compact entropy rows for the later entropy runner.
+        If either half is missing or invalid, both are recomputed together so
+        they can never describe different model forwards.
+        """
+        if first_identity == second_identity:
+            raise ValueError("paired checkpoint identities must differ")
+        sentence_ids = [str(example.sentence_id) for example in examples]
+        if len(sentence_ids) != len(set(sentence_ids)):
+            raise ArtifactError("checkpoint input contains duplicate sentence IDs")
+        for start in range(0, len(examples), self.chunk_size):
+            end = min(start + self.chunk_size, len(examples))
+            first_path = self.directory / first_identity.filename(start, end)
+            second_path = self.directory / second_identity.filename(start, end)
+            first_expected = self._expected_metadata(
+                examples, first_identity, start, end
+            )
+            second_expected = self._expected_metadata(
+                examples, second_identity, start, end
+            )
+            expected_ids = sentence_ids[start:end]
+            first = self._load_chunk(first_path, first_expected, expected_ids)
+            second = self._load_chunk(second_path, second_expected, expected_ids)
+            if first is None or second is None:
+                result = compute(examples[start:end], start)
+                if not isinstance(result, tuple) or len(result) != 2:
+                    raise TypeError("paired checkpoint computation must return two DataFrames")
+                first, second = result
+                if not isinstance(first, pd.DataFrame) or not isinstance(second, pd.DataFrame):
+                    raise TypeError("paired checkpoint computation must return two DataFrames")
+                _validate_frame_sentence_ids(first, expected_ids)
+                _validate_frame_sentence_ids(second, expected_ids)
+                self._write_chunk(first_path, first, first_expected)
+                self._write_chunk(second_path, second, second_expected)
+            yield first, second
+
     def _expected_metadata(
         self,
         examples: Sequence[T],

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -24,8 +25,21 @@ class AdapterOutput:
     visibility_mask: torch.Tensor | None = None
 
 
+@dataclass(frozen=True)
+class NativeTrajectory:
+    """One complete native 64-step generated trajectory."""
+
+    prompt: str
+    prefix_length: int
+    pre_forward_ids: tuple[torch.Tensor, ...]
+    argmax_ids: tuple[torch.Tensor, ...]
+    final_ids: torch.Tensor
+    metadata: dict[str, Any]
+
+
 class ModelAdapter(ABC):
     mask_free: bool = False
+    prediction_offset: int = 0
     capabilities: Capabilities = Capabilities()
 
     def __init__(self, backbone, tokenizer, device: str):
@@ -39,6 +53,23 @@ class ModelAdapter(ABC):
     @abstractmethod
     def forward_attentions(self, input_ids: torch.Tensor, output_hidden_states: bool = False): ...
 
+    def forward_attentions_only(self, input_ids: torch.Tensor):
+        """Return attentions without requiring an adapter to unembed logits.
+
+        The default keeps third-party/test adapters compatible.  Real adapters
+        override this method so attention-only experiments do not pay for the
+        large hidden-to-vocabulary projection.
+        """
+        _logits, attentions = self.forward_attentions(input_ids)
+        return attentions
+
+    def forward_features(self, input_ids: torch.Tensor):
+        """Return attentions and hidden states without requiring logits."""
+        _logits, attentions, hidden_states = self.forward_attentions(
+            input_ids, output_hidden_states=True
+        )
+        return attentions, hidden_states
+
     def get_logits(self, hidden_state: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
@@ -47,3 +78,9 @@ class ModelAdapter(ABC):
 
     def get_lm_head(self):
         raise NotImplementedError
+
+    def native_trajectory(self, prompt: str, **settings: Any) -> NativeTrajectory:
+        """Generate with the preserved random-reveal denoising sampler."""
+        from .native import random_reveal_trajectory
+
+        return random_reveal_trajectory(self, self.tokenizer, prompt, **settings)

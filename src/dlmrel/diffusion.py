@@ -12,6 +12,7 @@ stay comparable with the previous runs.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -132,6 +133,100 @@ def state_at_time(
 
 
 @torch.no_grad()
+def teacher_forced_trajectory(
+    model,
+    tokenizer,
+    text: str,
+    *,
+    steps: int = 64,
+    seed: int = 42,
+    include_bos: bool = True,
+) -> tuple[DenoisingState, ...]:
+    """Build one nested old-schedule trajectory with a single RNG reset."""
+    if steps != 64:
+        raise ValueError("the paper protocol requires exactly 64 steps")
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    true_ids, tokens = tokenize(tokenizer, text, model.device, include_bos)
+    sequence_length = true_ids.shape[1]
+    maskable = torch.ones_like(true_ids, dtype=torch.bool)
+    if include_bos:
+        maskable[:, 0] = False
+    xt = true_ids.masked_fill(maskable, tokenizer.mask_token_id)
+    remaining = maskable.clone()
+    unmask_step = [-1] * sequence_length
+    if include_bos:
+        unmask_step[0] = 0
+    states = []
+    for timestep in range(steps):
+        if timestep == steps - 1:
+            xt = true_ids.clone()
+            remaining = torch.zeros_like(remaining)
+            unmask_step = [timestep if value == -1 else value for value in unmask_step]
+        states.append(
+            DenoisingState(
+                input_ids=xt.clone(),
+                tokens=list(tokens),
+                is_visible=(~remaining[0]).cpu().tolist(),
+                unmask_step=list(unmask_step),
+            )
+        )
+        if timestep >= steps - 1:
+            continue
+        reveal_probability = 1.0 / (steps - timestep)
+        draw = torch.rand_like(remaining, dtype=torch.float, device=model.device)
+        reveal = remaining & (draw < reveal_probability)
+        xt = xt.clone()
+        xt[reveal] = true_ids[reveal]
+        for position in reveal[0].nonzero(as_tuple=True)[0].tolist():
+            if unmask_step[position] == -1:
+                unmask_step[position] = timestep + 1
+        remaining &= ~reveal
+    return tuple(states)
+
+
+@torch.no_grad()
+def attentions_for_state(model, state: DenoisingState):
+    """Read attentions for an already materialized nested trajectory state."""
+    if hasattr(model, "forward_attentions_only"):
+        return model.forward_attentions_only(state.input_ids)
+    _logits, attentions = model.forward_attentions(state.input_ids)
+    return attentions
+
+
+@torch.no_grad()
+def attention_batches_for_states(
+    model,
+    states: Sequence[DenoisingState],
+    *,
+    batch_size: int = 8,
+) -> Iterator[tuple[int, tuple[DenoisingState, ...], tuple[torch.Tensor, ...]]]:
+    """Forward equal-length trajectory states in small, memory-bounded batches.
+
+    Batching changes only execution shape: state order, token IDs, attention
+    formula, and all downstream scoring remain identical to one-state passes.
+    """
+    if batch_size < 1:
+        raise ValueError("trajectory batch_size must be positive")
+    materialized = tuple(states)
+    if not materialized:
+        return
+    shape = materialized[0].input_ids.shape
+    if shape[0] != 1 or any(state.input_ids.shape != shape for state in materialized):
+        raise ValueError("trajectory microbatching requires equal-length singleton states")
+    for start in range(0, len(materialized), batch_size):
+        current = materialized[start : start + batch_size]
+        input_ids = torch.cat([state.input_ids for state in current], dim=0)
+        if hasattr(model, "forward_attentions_only"):
+            attentions = model.forward_attentions_only(input_ids)
+        else:
+            _logits, attentions = model.forward_attentions(input_ids)
+        if any(layer.shape[0] != len(current) for layer in attentions):
+            raise RuntimeError("adapter returned an incorrect attention batch dimension")
+        yield start, current, attentions
+
+
+@torch.no_grad()
 def attentions_at_time(
     model,
     tokenizer,
@@ -143,23 +238,7 @@ def attentions_at_time(
 ):
     """Return `(attentions, state)` for one sentence at one timestep."""
     state = state_at_time(model, tokenizer, text, diffusion_time, steps, seed, include_bos)
-
-    if getattr(model, "mask_free", False):
-        _, attentions = forward_with_attentions(model, state.input_ids, None)
-        return attentions, state
-
-    from model import get_anneal_attn_mask
-
-    embeds = model.get_embeds(state.input_ids)
-    attn_mask = get_anneal_attn_mask(
-        seq_len=state.input_ids.shape[1],
-        bsz=state.input_ids.shape[0],
-        dtype=embeds.dtype,
-        device=state.input_ids.device,
-        attn_mask_ratio=1.0,
-    )
-    _, attentions = forward_with_attentions(model, state.input_ids, attn_mask)
-    return attentions, state
+    return attentions_for_state(model, state), state
 
 
 @torch.no_grad()
@@ -179,8 +258,8 @@ def states_at_time(
         _, hidden = model.forward_hidden_states(state.input_ids)
         return (), hidden, state
 
-    if getattr(model, "mask_free", False):
-        _, attentions, hidden = model.forward_attentions(state.input_ids, output_hidden_states=True)
+    if hasattr(model, "forward_features"):
+        attentions, hidden = model.forward_features(state.input_ids)
         return attentions, hidden, state
 
     from model import get_anneal_attn_mask
@@ -211,6 +290,7 @@ def receiver_predictions(
     attender_token: str = "last",
     exclude_bos: bool = True,
     exclude_self: bool = True,
+    batch_index: int = 0,
 ) -> np.ndarray:
     """Argmax receiver predicted by every head in one layer.
 
@@ -220,7 +300,7 @@ def receiver_predictions(
     exclusions are applied before the argmax, never after.
     """
     row_idx = attender_span[-1] if attender_token == "last" else attender_span[0]
-    row = attentions[layer][0, :, row_idx, :].detach().float().clone()
+    row = attentions[layer][batch_index, :, row_idx, :].detach().float().clone()
 
     if exclude_bos:
         row[:, 0] = float("-inf")
