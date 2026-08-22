@@ -10,3 +10,4 @@ scoring:
   top_k: 5
   primary_relation: object_to_verb
   primary_visibility: both_masked
+settings: {}

@@ -1,0 +1,127 @@
+{
+  "schema_version": "dlmrel-paper-prompts-v1",
+  "source": "preserved_diffugpt_s_issues_44_45_rerun",
+  "seed": 42,
+  "prompts": [
+    {
+      "id": "reasoning_0",
+      "task": "reasoning",
+      "prompt": "Question: A shop sold 93 items on Monday and half as many on Tuesday. How many in total? Answer step by step.\nAnswer:"
+    },
+    {
+      "id": "reasoning_1",
+      "task": "reasoning",
+      "prompt": "Question: A train travels 15 miles in 6 hours. What is its average speed in miles per hour? Explain briefly.\nAnswer:"
+    },
+    {
+      "id": "reasoning_2",
+      "task": "reasoning",
+      "prompt": "Question: A box has 43 red marbles and 5 blue marbles. What fraction are red? Explain step by step.\nAnswer:"
+    },
+    {
+      "id": "reasoning_3",
+      "task": "reasoning",
+      "prompt": "Question: What is 29 plus 3? Show your reasoning step by step.\nAnswer:"
+    },
+    {
+      "id": "reasoning_4",
+      "task": "reasoning",
+      "prompt": "Question: If a book has 81 pages and you read 3 per day, how many days to finish? Explain.\nAnswer:"
+    },
+    {
+      "id": "reasoning_5",
+      "task": "reasoning",
+      "prompt": "Question: A class has 87 students and 8 are absent. How many are present? Answer step by step.\nAnswer:"
+    },
+    {
+      "id": "reasoning_6",
+      "task": "reasoning",
+      "prompt": "Question: A shop sold 16 items on Monday and half as many on Tuesday. How many in total? Answer step by step.\nAnswer:"
+    },
+    {
+      "id": "reasoning_7",
+      "task": "reasoning",
+      "prompt": "Question: A train travels 23 miles in 5 hours. What is its average speed in miles per hour? Explain briefly.\nAnswer:"
+    },
+    {
+      "id": "reasoning_8",
+      "task": "reasoning",
+      "prompt": "Question: A box has 41 red marbles and 10 blue marbles. What fraction are red? Explain step by step.\nAnswer:"
+    },
+    {
+      "id": "reasoning_9",
+      "task": "reasoning",
+      "prompt": "Question: What is 89 plus 2? Show your reasoning step by step.\nAnswer:"
+    },
+    {
+      "id": "reasoning_10",
+      "task": "reasoning",
+      "prompt": "Question: If a book has 83 pages and you read 5 per day, how many days to finish? Explain.\nAnswer:"
+    },
+    {
+      "id": "reasoning_11",
+      "task": "reasoning",
+      "prompt": "Question: A class has 95 students and 10 are absent. How many are present? Answer step by step.\nAnswer:"
+    },
+    {
+      "id": "creative_0",
+      "task": "creative",
+      "prompt": "Write a short, vivid paragraph about a city waking up after rain:\n"
+    },
+    {
+      "id": "creative_1",
+      "task": "creative",
+      "prompt": "Continue this story in a whimsical style: The old library only opened its hidden door when\n"
+    },
+    {
+      "id": "creative_2",
+      "task": "creative",
+      "prompt": "Describe a quiet morning in a an old forest using vivid sensory detail:\n"
+    },
+    {
+      "id": "creative_3",
+      "task": "creative",
+      "prompt": "Write the opening of a story about a paper boat that could remember the future:\n"
+    },
+    {
+      "id": "creative_4",
+      "task": "creative",
+      "prompt": "Describe the feeling of an old forest at night in a single flowing paragraph:\n"
+    },
+    {
+      "id": "creative_5",
+      "task": "creative",
+      "prompt": "Tell a gentle tale about a music box who wanted to see the sea:\n"
+    },
+    {
+      "id": "creative_6",
+      "task": "creative",
+      "prompt": "Write a short, vivid paragraph about a city waking up after rain:\n"
+    },
+    {
+      "id": "creative_7",
+      "task": "creative",
+      "prompt": "Continue this story in a whimsical style: The old library only opened its hidden door when\n"
+    },
+    {
+      "id": "creative_8",
+      "task": "creative",
+      "prompt": "Describe a quiet morning in a a harbor town using vivid sensory detail:\n"
+    },
+    {
+      "id": "creative_9",
+      "task": "creative",
+      "prompt": "Write the opening of a story about a clockwork bird that could remember the future:\n"
+    },
+    {
+      "id": "creative_10",
+      "task": "creative",
+      "prompt": "Describe the feeling of an old forest at night in a single flowing paragraph:\n"
+    },
+    {
+      "id": "creative_11",
+      "task": "creative",
+      "prompt": "Tell a gentle tale about a clockwork bird who wanted to see the sea:\n"
+    }
+  ]
+}

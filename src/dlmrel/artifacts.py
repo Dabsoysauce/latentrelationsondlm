@@ -93,11 +93,26 @@ def selection_source_hash(path: str | Path) -> str:
     source = Path(path)
     if source.is_dir() and (source / "relation-selection").is_dir():
         source = source / "relation-selection"
-    manifest = (
-        source / "relation_selection_bundle.json"
-        if source.is_dir()
-        else source
-    )
+    if source.is_dir() and (source / "selection_bundle.json").is_file():
+        manifest = source / "selection_bundle.json"
+    else:
+        manifest = source / "relation_selection_bundle.json" if source.is_dir() else source
+    if manifest.name == "selection_bundle.json":
+        bundle = json.loads(manifest.read_text(encoding="utf-8"))
+        identities = {
+            relation: record.get("lock_hash")
+            for relation, record in bundle.get("relations", {}).items()
+        }
+        if bundle.get("development_used") is not False or any(
+            value is None for value in identities.values()
+        ):
+            raise ArtifactError("paper selection bundle has incomplete scientific identities")
+        return canonical_hash(
+            {
+                "schema_version": bundle.get("schema_version"),
+                "relation_lock_hashes": identities,
+            }
+        )
     if manifest.name == "relation_selection_bundle.json":
         bundle = json.loads(manifest.read_text(encoding="utf-8"))
         relations = bundle.get("relations", {})
@@ -129,6 +144,26 @@ def scientific_configuration(
         if digest is None:
             digest = selection_source_hash(lock_path)
         value["selection_lock_hash"] = digest
+    experiment = value.get("experiment") or {}
+    paper_ids = {
+        "relation_head_receiver_prediction",
+        "relation_head_receiver_prediction_over_diffusion_time",
+        "attention_entropy",
+        "pos_token_class_linear_probes",
+        "final_token_prediction_by_layer",
+        "prediction_before_unmasking_timing_analysis",
+        "direct_logit_attribution",
+        "matched_relation_head_ablation",
+        "attention_heatmaps_and_trajectories",
+        "multilingual_relation_head_transfer",
+    }
+    if experiment.get("id") in paper_ids:
+        dataset = value.get("dataset") or {}
+        dataset.pop("dev_from", None)
+        dataset.pop("n_dev", None)
+        checksums = dataset.get("checksums")
+        if isinstance(checksums, dict):
+            checksums.pop("dev", None)
     return value
 
 
@@ -460,7 +495,7 @@ def validate_run(path: str | Path) -> dict[str, Any]:
             from .config import RunConfig
 
             resolved_config = RunConfig.from_dict(config)
-            _validate_experiment_artifacts(path, resolved_config, instances, errors)
+            _validate_experiment_artifacts(path, resolved_config, instances, summary, errors)
             relation_bundle = path / "relation-selection"
             if relation_bundle.is_dir():
                 from .relation_selection import load_relation_locks
@@ -543,10 +578,15 @@ def _validate_finite_table(frame: pd.DataFrame, label: str, errors: list[str]) -
             errors.append(f"{label} column {column} contains missing/non-finite values")
 
 
-def _validate_experiment_artifacts(path, cfg, instances, errors: list[str]) -> None:
+def _validate_experiment_artifacts(path, cfg, instances, summary, errors: list[str]) -> None:
     if instances is None:
         return
-    required_columns = {
+    from .config import is_paper_experiment
+
+    paper = is_paper_experiment(cfg.experiment) and bool(
+        (summary or {}).get("canonical_paper_protocol")
+    )
+    legacy_required = {
         "head_search": {
             "sentence_id",
             "instance_id",
@@ -598,14 +638,80 @@ def _validate_experiment_artifacts(path, cfg, instances, errors: list[str]) -> N
             "gold_upos",
             "prediction",
         },
-    }[cfg.experiment.type]
+    }
+    paper_required = {
+        "relation_head_receiver_prediction": {
+            "sentence_id", "instance_id", "seed", "relation", "layer", "head", "correct",
+            "predicted_source_subtoken",
+        },
+        "relation_head_receiver_prediction_over_diffusion_time": {
+            "sentence_id", "instance_id", "seed", "relation", "layer", "head", "timestep",
+            "normalized_progress", "visibility", "correct", "predicted_source_subtoken",
+        },
+        "attention_entropy": {
+            "sentence_id", "seed", "layer", "head", "timestep", "normalized_progress",
+            "entropy_normalized", "relative_label", "actual_layer_index", "total_model_layers",
+        },
+        "pos_token_class_linear_probes": {
+            "sentence_id", "seed", "word_index", "label", "prediction", "relative_label",
+            "feature_kind", "normalized_progress",
+        },
+        "final_token_prediction_by_layer": {
+            "sentence_id", "seed", "timestep", "relative_label", "target_token_id", "top1",
+            "top5", "rank", "mrr", "prediction_offset",
+        },
+        "prediction_before_unmasking_timing_analysis": {
+            "sentence_id", "seed", "found_time", "unmask_time", "lead_steps", "token_class",
+        },
+        "direct_logit_attribution": {
+            "sentence_id", "seed", "relation", "layer", "head", "timestep", "control_kind",
+            "target_logit_support", "target_rank", "vocabulary_percentile",
+        },
+        "matched_relation_head_ablation": {
+            "sentence_id", "seed", "relation", "layer", "head", "timestep", "control_kind",
+            "target_logit_change", "target_probability_change", "target_rank_change",
+        },
+        "attention_heatmaps_and_trajectories": {
+            "sentence_id", "seed", "relation", "layer", "head", "timestep", "entropy",
+            "relation_attention_mass",
+        },
+        "multilingual_relation_head_transfer": {
+            "sentence_id", "instance_id", "seed", "relation", "layer", "head", "timestep",
+            "normalized_progress", "visibility", "correct", "predicted_source_subtoken",
+        },
+    }
+    required_columns = (
+        paper_required[cfg.experiment.type] if paper else legacy_required[cfg.experiment.type]
+    )
     if missing := required_columns - set(instances):
         errors.append(f"{cfg.experiment.type} instances missing columns: {sorted(missing)}")
-    if "seed" in instances and set(instances["seed"].dropna().astype(int)) != set(
-        cfg.experiment.seeds
-    ):
-        errors.append("instances do not contain exactly the configured seeds")
-    if cfg.experiment.type in {"time_curve", "attention_entropy", "logit_lens"}:
+    if "seed" in instances:
+        actual_seeds = set(instances["seed"].dropna().astype(int))
+        expected_seeds = set(cfg.experiment.seeds)
+        deterministic_selection = paper and cfg.experiment.type == (
+            "relation_head_receiver_prediction"
+        )
+        if (deterministic_selection and actual_seeds != {42}) or (
+            not deterministic_selection and actual_seeds != expected_seeds
+        ):
+            errors.append("instances do not contain exactly the configured scientific seeds")
+    progress_types = {"time_curve", "attention_entropy", "logit_lens"}
+    if is_paper_experiment(cfg.experiment) and not paper:
+        # Backward-compatible synthetic/legacy artifacts created before the
+        # canonical summary marker are validated by their saved schema only.
+        progress_types = set()
+    if paper:
+        progress_types = {
+            "relation_head_receiver_prediction_over_diffusion_time",
+            "attention_entropy",
+            "pos_token_class_linear_probes",
+            "final_token_prediction_by_layer",
+            "direct_logit_attribution",
+            "matched_relation_head_ablation",
+            "attention_heatmaps_and_trajectories",
+            "multilingual_relation_head_transfer",
+        }
+    if cfg.experiment.type in progress_types:
         progress = sorted(instances["normalized_progress"].dropna().astype(float).unique())
         if progress != sorted(cfg.experiment.normalized_progress):
             errors.append("instances do not contain every configured progress point")
@@ -614,6 +720,49 @@ def _validate_experiment_artifacts(path, cfg, instances, errors: list[str]) -> N
         )
         if sorted(instances["timestep"].dropna().astype(int).unique()) != expected_times:
             errors.append("instances use incorrect or incomplete timesteps")
+
+    if paper:
+        lock_required = cfg.experiment.type in {
+            "relation_head_receiver_prediction",
+            "relation_head_receiver_prediction_over_diffusion_time",
+            "direct_logit_attribution",
+            "matched_relation_head_ablation",
+            "attention_heatmaps_and_trajectories",
+            "multilingual_relation_head_transfer",
+        }
+        if lock_required:
+            resolved_path = path / "selection_locks.resolved.json"
+            if not resolved_path.is_file():
+                errors.append("paper locked experiment is missing selection_locks.resolved.json")
+            else:
+                try:
+                    from .paper_protocol import load_selection_bundle
+
+                    resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
+                    locks = load_selection_bundle(
+                        resolved["source"],
+                        model_id=cfg.model.id,
+                        model_revision=cfg.model.revision,
+                    )
+                    expected = {
+                        relation: {"layer": lock.layer, "head": lock.head}
+                        for relation, lock in locks.locks.items()
+                    }
+                    if resolved.get("relations") != expected:
+                        errors.append("resolved paper locks differ from their immutable source")
+                except (
+                    ArtifactError,
+                    KeyError,
+                    OSError,
+                    TypeError,
+                    ValueError,
+                    json.JSONDecodeError,
+                ) as error:
+                    errors.append(f"resolved paper-lock provenance is invalid: {error}")
+        if cfg.experiment.type == "relation_head_receiver_prediction":
+            if not (path / "selection-locks" / "selection_bundle.json").is_file():
+                errors.append("paper relation selection is missing its six-lock bundle")
+        return
 
     lock_required = cfg.experiment.type == "time_curve" or cfg.experiment.type == "head_search"
     if lock_required:

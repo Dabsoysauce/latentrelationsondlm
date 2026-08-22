@@ -12,7 +12,8 @@ from typing import Any
 import torch
 
 from .artifacts import ArtifactError, atomic_json, final_artifact_hashes
-from .config import RunConfig
+from .config import RunConfig, is_paper_experiment
+from .paper_protocol import PaperLockSet
 from .relation_selection import RelationLockSet, load_relation_locks
 
 ATTENTION_ROW_SUM_TOLERANCE = 1e-2
@@ -158,7 +159,11 @@ def load_adapter(cfg: RunConfig):
     return model, tokenizer, metadata
 
 
-def read_source_locks(path: str | Path, cfg: RunConfig) -> RelationLockSet:
+def read_source_locks(path: str | Path, cfg: RunConfig) -> RelationLockSet | PaperLockSet:
+    if is_paper_experiment(cfg.experiment):
+        from .experiments.paper_relation import load_paper_locks
+
+        return load_paper_locks(path, cfg)
     return load_relation_locks(path, cfg)
 
 
@@ -169,7 +174,72 @@ def run_real(cfg: RunConfig, run_dir: Path, manifest_hashes: dict[str, str]) -> 
     )
     model, tokenizer, model_metadata = load_adapter(cfg)
 
-    if cfg.experiment.type == "head_search":
+    if is_paper_experiment(cfg.experiment) and cfg.model.family == "fake":
+        from .experiments.paper_fake import run
+
+        details = run(cfg, run_dir, manifest_hashes=manifest_hashes, source_locks=source_locks)
+    elif cfg.experiment.type == "relation_head_receiver_prediction":
+        from .experiments.paper_relation import run_selection_and_test
+
+        details = run_selection_and_test(
+            model,
+            tokenizer,
+            cfg,
+            run_dir,
+            manifest_hashes=manifest_hashes,
+            model_metadata=model_metadata,
+        )
+    elif cfg.experiment.type == "relation_head_receiver_prediction_over_diffusion_time":
+        if source_locks is None:
+            raise ArtifactError("paper time curves require --selection-lock")
+        from .experiments.paper_relation import run_time_or_transfer
+
+        details = run_time_or_transfer(
+            model, tokenizer, cfg, run_dir, source_locks=source_locks
+        )
+    elif cfg.experiment.type == "attention_entropy" and cfg.experiment.id == "attention_entropy":
+        from .experiments.paper_entropy import run
+
+        details = run(model, tokenizer, cfg, run_dir)
+    elif cfg.experiment.type == "pos_token_class_linear_probes":
+        from .experiments.paper_pos import run
+
+        details = run(model, tokenizer, cfg, run_dir)
+    elif cfg.experiment.type == "final_token_prediction_by_layer":
+        from .experiments.paper_native import run_final_token
+
+        details = run_final_token(model, tokenizer, cfg, run_dir)
+    elif cfg.experiment.type == "prediction_before_unmasking_timing_analysis":
+        from .experiments.paper_native import run_timing
+
+        details = run_timing(model, tokenizer, cfg, run_dir)
+    elif cfg.experiment.type == "direct_logit_attribution":
+        if source_locks is None:
+            raise ArtifactError("Direct Logit Attribution requires --selection-lock")
+        from .experiments.paper_causal import run_dla
+
+        details = run_dla(model, tokenizer, cfg, run_dir, source_locks=source_locks)
+    elif cfg.experiment.type == "matched_relation_head_ablation":
+        if source_locks is None:
+            raise ArtifactError("Matched Relation-Head Ablation requires --selection-lock")
+        from .experiments.paper_causal import run_ablation
+
+        details = run_ablation(model, tokenizer, cfg, run_dir, source_locks=source_locks)
+    elif cfg.experiment.type == "attention_heatmaps_and_trajectories":
+        if source_locks is None:
+            raise ArtifactError("attention trajectories require --selection-lock")
+        from .experiments.paper_visuals import run
+
+        details = run(model, tokenizer, cfg, run_dir, source_locks=source_locks)
+    elif cfg.experiment.type == "multilingual_relation_head_transfer":
+        if source_locks is None:
+            raise ArtifactError("multilingual transfer requires --selection-lock")
+        from .experiments.paper_relation import run_time_or_transfer
+
+        details = run_time_or_transfer(
+            model, tokenizer, cfg, run_dir, source_locks=source_locks, transfer=True
+        )
+    elif cfg.experiment.type == "head_search":
         from .experiments.head_search import run
 
         details = run(
@@ -207,6 +277,7 @@ def run_real(cfg: RunConfig, run_dir: Path, manifest_hashes: dict[str, str]) -> 
         {
             "schema_version": "dlmrel-run-v1",
             "completion_status": "complete",
+            "canonical_paper_protocol": is_paper_experiment(cfg.experiment),
             "capabilities": asdict(cfg.model.capabilities),
             "model_metadata": model_metadata,
             **details,

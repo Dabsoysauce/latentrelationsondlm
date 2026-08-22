@@ -8,6 +8,7 @@ from .base import AdapterOutput, Capabilities, ModelAdapter
 
 
 class FakeAdapter(ModelAdapter):
+    prediction_offset = 0
     capabilities = Capabilities(
         logits=True,
         hidden_states=True,
@@ -21,6 +22,10 @@ class FakeAdapter(ModelAdapter):
         self.vocab = vocab
         self.device = "cpu"
         self.mask_free = False
+        self.tokenizer = None
+        self.projection_weight = (
+            torch.arange(hidden * hidden, dtype=torch.float32).reshape(hidden, hidden) / 100.0
+        )
 
     def forward(self, input_ids: torch.Tensor, *, timestep: int = 0) -> AdapterOutput:
         batch, seq = input_ids.shape
@@ -56,3 +61,10 @@ class FakeAdapter(ModelAdapter):
         if output_hidden_states:
             return output.logits, output.attentions, output.hidden_states
         return output.logits, output.attentions
+
+    def projection_input(self, input_ids: torch.Tensor, layer: int) -> torch.Tensor:
+        """Deterministic concatenated-head values for exact decomposition tests."""
+        if not 0 <= layer < self.layers:
+            raise ValueError("fake layer outside model")
+        basis = self.get_embeds(input_ids)
+        return basis + float(layer) / 10.0

@@ -132,6 +132,79 @@ def state_at_time(
 
 
 @torch.no_grad()
+def teacher_forced_trajectory(
+    model,
+    tokenizer,
+    text: str,
+    *,
+    steps: int = 64,
+    seed: int = 42,
+    include_bos: bool = True,
+) -> tuple[DenoisingState, ...]:
+    """Build one nested old-schedule trajectory with a single RNG reset."""
+    if steps != 64:
+        raise ValueError("the paper protocol requires exactly 64 steps")
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    true_ids, tokens = tokenize(tokenizer, text, model.device, include_bos)
+    sequence_length = true_ids.shape[1]
+    maskable = torch.ones_like(true_ids, dtype=torch.bool)
+    if include_bos:
+        maskable[:, 0] = False
+    xt = true_ids.masked_fill(maskable, tokenizer.mask_token_id)
+    remaining = maskable.clone()
+    unmask_step = [-1] * sequence_length
+    if include_bos:
+        unmask_step[0] = 0
+    states = []
+    for timestep in range(steps):
+        if timestep == steps - 1:
+            xt = true_ids.clone()
+            remaining = torch.zeros_like(remaining)
+            unmask_step = [timestep if value == -1 else value for value in unmask_step]
+        states.append(
+            DenoisingState(
+                input_ids=xt.clone(),
+                tokens=list(tokens),
+                is_visible=(~remaining[0]).cpu().tolist(),
+                unmask_step=list(unmask_step),
+            )
+        )
+        if timestep >= steps - 1:
+            continue
+        reveal_probability = 1.0 / (steps - timestep)
+        draw = torch.rand_like(remaining, dtype=torch.float, device=model.device)
+        reveal = remaining & (draw < reveal_probability)
+        xt = xt.clone()
+        xt[reveal] = true_ids[reveal]
+        for position in reveal[0].nonzero(as_tuple=True)[0].tolist():
+            if unmask_step[position] == -1:
+                unmask_step[position] = timestep + 1
+        remaining &= ~reveal
+    return tuple(states)
+
+
+@torch.no_grad()
+def attentions_for_state(model, state: DenoisingState):
+    """Read attentions for an already materialized nested trajectory state."""
+    if getattr(model, "mask_free", False):
+        _logits, attentions = model.forward_attentions(state.input_ids)
+        return attentions
+    from model import get_anneal_attn_mask
+
+    embeds = model.get_embeds(state.input_ids)
+    attention_mask = get_anneal_attn_mask(
+        seq_len=state.input_ids.shape[1],
+        bsz=state.input_ids.shape[0],
+        dtype=embeds.dtype,
+        device=state.input_ids.device,
+        attn_mask_ratio=1.0,
+    )
+    _logits, attentions = forward_with_attentions(model, state.input_ids, attention_mask)
+    return attentions
+
+
+@torch.no_grad()
 def attentions_at_time(
     model,
     tokenizer,

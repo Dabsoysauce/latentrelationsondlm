@@ -1,0 +1,18 @@
+id: matched_relation_head_ablation
+type: matched_relation_head_ablation
+track: exploratory_extensions
+steps: 64
+normalized_progress: [0.31746031746031744, 0.47619047619047616, 0.6349206349206349]
+seeds: [42, 43, 44]
+scoring:
+  attender_rows: last
+  receiver_span: source_argmax
+  top_k: 1
+  primary_relation: object_to_verb
+  primary_visibility: both_visible
+settings:
+  diagnostic_timesteps: [20, 30, 40]
+  target: masked_gold_receiver_subtokens
+  intervention: zero_requested_output_projection_input_slice
+  controls: [matched_low_relation_heads, lower_pos_decoding_heads]
+  metrics: [target_logit_change, target_probability_change, target_rank_change, top1_change, token_type_support_change]

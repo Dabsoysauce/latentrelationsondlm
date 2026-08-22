@@ -153,6 +153,7 @@ def load_backbone(cls, name: str, hf_config, dtype, **extra):
 
 class WrappedAdapter(ModelAdapter, torch.nn.Module):
     mask_free = False
+    prediction_offset = -1
     final_norm_attr = "norm"
     capabilities = Capabilities(
         logits=True,
@@ -198,8 +199,8 @@ class WrappedAdapter(ModelAdapter, torch.nn.Module):
             use_cache=False,
         )
         if output_hidden_states:
-            return None, out.attentions, out.hidden_states
-        return None, out.attentions
+            return self.get_logits(out.last_hidden_state), out.attentions, out.hidden_states
+        return self.get_logits(out.last_hidden_state), out.attentions
 
 
 def load_diffullama(model_cfg: dict, adapter_cls):

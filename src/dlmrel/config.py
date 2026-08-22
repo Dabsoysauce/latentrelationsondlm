@@ -29,14 +29,44 @@ NOUN_UPOS = frozenset({"NOUN", "PROPN"})
 VERB_UPOS = frozenset({"VERB", "AUX"})
 PROTOCOL_SEEDS = [42, 43, 44]
 PROTOCOL_STEPS = 64
+PAPER_EXPERIMENT_TYPES = (
+    "relation_head_receiver_prediction",
+    "relation_head_receiver_prediction_over_diffusion_time",
+    "attention_entropy",
+    "pos_token_class_linear_probes",
+    "final_token_prediction_by_layer",
+    "prediction_before_unmasking_timing_analysis",
+    "direct_logit_attribution",
+    "matched_relation_head_ablation",
+    "attention_heatmaps_and_trajectories",
+    "multilingual_relation_head_transfer",
+)
+_ALL_64_PROGRESS = [step / 63 for step in range(64)]
 PROTOCOL_PROGRESS = {
     "head_search": [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0],
     "time_curve": [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0],
     "attention_entropy": [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0],
     "logit_lens": [0.0, 0.25, 0.5, 0.75, 1.0],
     "pos_probe": [0.5],
+    "relation_head_receiver_prediction": [1.0],
+    "relation_head_receiver_prediction_over_diffusion_time": _ALL_64_PROGRESS,
+    "attention_entropy_paper": _ALL_64_PROGRESS,
+    "pos_token_class_linear_probes": [0.0, 0.25, 0.5, 0.75],
+    "final_token_prediction_by_layer": _ALL_64_PROGRESS,
+    "prediction_before_unmasking_timing_analysis": _ALL_64_PROGRESS,
+    "direct_logit_attribution": [20 / 63, 30 / 63, 40 / 63],
+    "matched_relation_head_ablation": [20 / 63, 30 / 63, 40 / 63],
+    "attention_heatmaps_and_trajectories": _ALL_64_PROGRESS,
+    "multilingual_relation_head_transfer": _ALL_64_PROGRESS,
 }
 _SHA256 = re.compile(r"sha256:[0-9a-fA-F]{64}\Z")
+
+
+def is_paper_experiment(experiment: ExperimentConfig) -> bool:
+    """Whether a resolved experiment belongs to the corrected active protocol."""
+    return experiment.type in PAPER_EXPERIMENT_TYPES or (
+        experiment.type == "attention_entropy" and experiment.id == "attention_entropy"
+    )
 
 
 class ConfigError(ValueError):
@@ -118,8 +148,8 @@ class ScoringConfig:
     def validate(self) -> None:
         if self.attender_rows not in {"mean", "first", "last"}:
             raise ConfigError("attender_rows must be mean, first, or last")
-        if self.receiver_span not in {"sum", "mean", "max"}:
-            raise ConfigError("receiver_span must be sum, mean, or max")
+        if self.receiver_span not in {"sum", "mean", "max", "source_argmax"}:
+            raise ConfigError("receiver_span must be sum, mean, max, or source_argmax")
         if self.top_k < 1:
             raise ConfigError("top_k must be positive")
 
@@ -134,6 +164,7 @@ class ExperimentConfig:
     )
     seeds: list[int] = field(default_factory=lambda: [42, 43, 44])
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
+    settings: dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
         if self.seeds != PROTOCOL_SEEDS:
@@ -142,12 +173,49 @@ class ExperimentConfig:
             raise ConfigError("experiment steps must be exactly 64")
         if any(x < 0 or x > 1 for x in self.normalized_progress):
             raise ConfigError("normalized progress must lie in [0, 1]")
-        expected_progress = PROTOCOL_PROGRESS.get(self.type)
+        progress_key = "attention_entropy_paper" if (
+            self.type == "attention_entropy" and self.id == "attention_entropy"
+        ) else self.type
+        expected_progress = PROTOCOL_PROGRESS.get(progress_key)
         if expected_progress is not None and self.normalized_progress != expected_progress:
             raise ConfigError(f"normalized progress does not match the frozen {self.type} protocol")
         self.scoring.validate()
-        if self.scoring != ScoringConfig():
+        if is_paper_experiment(self):
+            self._validate_paper_protocol()
+        elif self.scoring != ScoringConfig():
             raise ConfigError("scoring settings do not match the frozen protocol")
+
+    def _validate_paper_protocol(self) -> None:
+        if self.id != self.type and self.id != "attention_entropy":
+            raise ConfigError("corrected paper config id and type must be identical")
+        frozen = ScoringConfig(
+            attender_rows="last",
+            receiver_span="source_argmax",
+            top_k=1,
+            primary_relation="object_to_verb",
+            primary_visibility="both_visible",
+        )
+        if self.scoring != frozen:
+            raise ConfigError("corrected paper scoring must use the old single-source argmax")
+        if self.settings.get("relative_depths") not in (
+            None,
+            {"early": 0.2, "middle": 0.5, "late": 0.9},
+        ):
+            raise ConfigError("relative depths must be early=.20, middle=.50, late=.90")
+        forbidden = {"dev", "development", "permutation", "permutations", "holm"}
+        serialized = repr(self.settings).lower()
+        if any(name in serialized for name in forbidden):
+            raise ConfigError("corrected paper settings cannot reference dev, permutations, or Holm")
+        if self.type in {
+            "relation_head_receiver_prediction_over_diffusion_time",
+            "final_token_prediction_by_layer",
+            "prediction_before_unmasking_timing_analysis",
+            "attention_heatmaps_and_trajectories",
+            "multilingual_relation_head_transfer",
+        } and len(self.normalized_progress) != 64:
+            raise ConfigError("corrected time-resolved experiments must contain all 64 steps")
+        if self.id == "attention_entropy" and len(self.normalized_progress) != 64:
+            raise ConfigError("Attention Entropy must contain all 64 steps")
 
 
 @dataclass(frozen=True)
@@ -186,12 +254,25 @@ class RunConfig:
             "attention_entropy": "attentions",
             "pos_probe": "hidden_states",
             "logit_lens": "logits",
+            "relation_head_receiver_prediction": "attentions",
+            "relation_head_receiver_prediction_over_diffusion_time": "attentions",
+            "pos_token_class_linear_probes": "hidden_states",
+            "final_token_prediction_by_layer": "hidden_states",
+            "prediction_before_unmasking_timing_analysis": "logits",
+            "direct_logit_attribution": "hidden_states",
+            "matched_relation_head_ablation": "logits",
+            "attention_heatmaps_and_trajectories": "attentions",
+            "multilingual_relation_head_transfer": "attentions",
         }
         if self.experiment.type not in required:
             raise ConfigError(f"unsupported experiment type: {self.experiment.type!r}")
         capability = required.get(self.experiment.type)
         if capability and not getattr(self.model.capabilities, capability):
             raise ConfigError(f"experiment {self.experiment.type!r} requires model capability {capability!r}")
+        if self.experiment.type == "multilingual_relation_head_transfer" and self.track != (
+            "external_treebank_transfer"
+        ):
+            raise ConfigError("multilingual transfer requires the external_treebank_transfer track")
 
     @classmethod
     def load_files(

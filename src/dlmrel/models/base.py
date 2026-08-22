@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -24,8 +25,21 @@ class AdapterOutput:
     visibility_mask: torch.Tensor | None = None
 
 
+@dataclass(frozen=True)
+class NativeTrajectory:
+    """One complete native 64-step generated trajectory."""
+
+    prompt: str
+    prefix_length: int
+    pre_forward_ids: tuple[torch.Tensor, ...]
+    argmax_ids: tuple[torch.Tensor, ...]
+    final_ids: torch.Tensor
+    metadata: dict[str, Any]
+
+
 class ModelAdapter(ABC):
     mask_free: bool = False
+    prediction_offset: int = 0
     capabilities: Capabilities = Capabilities()
 
     def __init__(self, backbone, tokenizer, device: str):
@@ -47,3 +61,9 @@ class ModelAdapter(ABC):
 
     def get_lm_head(self):
         raise NotImplementedError
+
+    def native_trajectory(self, prompt: str, **settings: Any) -> NativeTrajectory:
+        """Generate with the preserved random-reveal denoising sampler."""
+        from .native import random_reveal_trajectory
+
+        return random_reveal_trajectory(self, self.tokenizer, prompt, **settings)

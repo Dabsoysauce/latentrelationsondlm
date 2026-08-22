@@ -1,101 +1,142 @@
-# Frozen research protocol
+# Frozen old-paper protocol
 
-## Scope
+## Global invariants
 
-The confirmatory English dataset is UD English EWT 2.15. German GSD and
-Japanese GSD are locked multilingual transfers. The research models are
-Dream-7B and DiffuLLaMA-7B; the fake model exists only for CPU tests.
+The corrected protocol targets Dream-7B and DiffuLLaMA-7B with their pinned
+model, tokenizer, and remote-code revisions. It uses EWT plus locked transfer
+to German GSD and Japanese GSD. Every stochastic experiment uses exactly seeds
+`42`, `43`, and `44`. Fully masked and forced fully visible observations
+are stored once rather than presented as three independent observations.
 
-The primary analysis is object-to-verb receiver prediction while both words
-are masked. Five predefined relation-selection secondaries are
-subject-to-verb, object-adjective-to-noun, subject-adjective-to-noun,
-object-determiner-to-noun, and subject-determiner-to-noun. Other secondary
-analyses are the locked-head time curve, attention entropy, logit lens, and
-masked POS probe. DLA, head ablation, native-generation
-timing, GPT-2, LLaDA, DiffuGPT, and the extra English treebanks are deferred and
-are not represented as supported results.
+Generic depth comparisons map `early=.20`, `middle=.50`, and `late=.90`
+to `round(fraction * (number_of_layers - 1))`. Every output records the
+label, fraction, actual block, and total block count.
 
-## Data freeze
+Corrected runners use selection and held-out test only. They never open, hash,
+checkpoint, or tune on a development split. The official development files
+remain only as dataset and legacy provenance. Corrected runners also never
+execute permutation inference or Holm correction.
 
-Each dataset YAML pins the UD repository commit and the SHA-256 of train, dev,
-and test files. EWT train supplies selection sentences, EWT dev chooses among
-each relation's select-set top five heads, and EWT test evaluates every
-relation at its own locked head.
-German and Japanese keep their official boundaries and receive the exact EWT
-lock without reselection. Normalized duplicate text is removed across roles,
-and tokenizer failures are recorded rather than replaced.
+## Relation-Head Receiver Prediction
 
-## Scoring and selection
+Every head is scored once on fully visible EWT selection sentences at timestep
+63. For each of the six relations, the direct selection winner becomes the
+immutable lock. Ties use accuracy descending, valid denominator descending,
+layer ascending, then head ascending. All six locks are published before the
+test manifest is opened.
 
-Dependencies are directed from the dependent query word to its syntactic head.
-Attention rows are averaged over query subtokens and receiver mass is summed
-over receiver subtokens. Special tokens, self positions, and invalid alignments
-cannot become receiver candidates.
+The executable old-code receiver rule is authoritative: use the final attender
+subtoken row, remove BOS and the complete attender span, and choose one source
+subtoken by argmax. A prediction is correct when that one source subtoken lies
+inside the gold receiver span. Receiver word spans are never summed before
+selection. This differs from paper prose that describes averaging attender
+rows; the code/paper disagreement is recorded in lock metadata.
 
-Head selection is performed independently for each of the six canonical
-relations. A head must have at least 25 relation rows to be eligible. Within a
-relation, select ranking is accuracy descending, denominator descending, layer
-ascending, then head ascending. Only the top five eligible select heads enter
-development evaluation, where the same ordering chooses the lock; a dev head
-outside that gate cannot win. Insufficient relations receive a documented
-status and no forced lock. Three-seed evidence and select/dev rank stability
-remain in each relation's candidate tables and lock.
+Held-out EWT test runs score only the matching frozen relation head and report
+raw counts, accuracy, old receiver controls, and lock provenance.
 
-Each relation is evaluated only at its matching relation-specific lock. New EWT
-test, time-curve, and transfer runs score the union of the six locked heads and
-then retain each relation only at its own head; they never broadcast the object
-head to the other relations. The legacy `selection_lock.json` remains an
-unambiguous object-only alias. Existing object-head-only test rows remain valid
-only for that object analysis and are not six-relation test results.
+## Relation-Head Receiver Prediction over Diffusion Time
 
-Test outcomes cannot affect any relation lock. Selection-aware permutation
-p-values are computed per relation; the primary is reported separately and
-Holm correction covers the fixed family of five secondaries. In each split and
-permutation, every relation instance receives one uniformly sampled receiver
-from its aligned within-sentence word candidates, excluding its attender and
-all non-word special/BOS/padding positions. That label is shared across every
-head and seed for the instance. Each permutation ranks on select, chooses among
-the select top five on dev, and only then evaluates the selected head on test.
-The finite-sample p-value is `(1 + count(null >= observed)) / (B + 1)`, with
-`B=1000` for real runs. Deterministic per-index random streams and atomic
-checkpoints make resumed and uninterrupted null statistics identical.
+The fully visible locks are never reselected. A single RNG reset produces one
+nested 64-state teacher-forced trajectory per sentence/seed. Still-masked
+tokens reveal with probability `1 / remaining_steps`. Reports cover every
+timestep and the old two-way visibility split:
 
-## Controls and uncertainty
+- `both_masked`: no subtoken in either endpoint is visible;
+- `at_least_one_revealed`: at least one endpoint subtoken is visible.
 
-The locked head is compared with a select-fit fixed offset, uniform receiver,
-nearest receiver, previous and next word, oracle receiver POS, wrong same-POS
-word, and a deterministic matched alternative. The primary interval is a
-sentence-clustered bootstrap, so repeated relation and seed rows from one
-sentence are never treated as independent sentences. Seed summaries remain
-separate, selection-aware permutations repeat the complete select/dev/test
-protocol without test leakage, and Holm correction is the default if a
-reported family contains multiple tests.
+One revealed piece immediately leaves `both_masked`. The configured minimum
+masked-instance cutoff is reported alongside raw denominators.
 
-Every active experiment uses exactly three stochastic seeds: `42`, `43`, and
-`44`. The POS probe is fit, tuned on development data, and evaluated
-independently for each seed before its seed-level metrics are summarized.
+## Attention Entropy
 
-Scientific configuration identity includes the pinned model and revisions,
-dataset, manifest hashes, experiment, seeds, progress points, scoring, and the
-scientific contents of any source selection lock. Runtime paths, run IDs,
-`resume`, and `dry_run` are operational metadata and do not alter that
-identity. Long GPU loops write an atomic checkpoint after every 300 input
-sentences; a checkpoint is reusable only when its scientific configuration,
-manifests, stage, seed, time point, head selection, and sentence range match.
+Attention Entropy uses gold teacher-forced trajectories, all 64 steps, all
+heads in the relative early/middle/late layers, and the old normalized entropy.
+Only the BOS query row is excluded; the BOS source column remains in each
+distribution. Outputs include per-head trajectories, per-layer summaries,
+early and late entropy, delta, slope, direction, percentages, and seed
+mean/standard deviation.
 
-## Outputs and claims
+The supplied source did not preserve unambiguous early/late window boundaries.
+The active config freezes inclusive windows `0..15` and `48..63` and labels
+that choice as a provenance limitation rather than presenting it as recovered
+fact.
 
-Each head-search run contains an immutable `relation-selection/` bundle with
-six relation records, per-relation candidate tables, successful locks, source
-hashes, copied config, metadata, summary, and validation. Lock derivation is
-select/dev-only; permutation results are written later by the head-search run
-after the required all-head test evidence exists. The primary alias is
-byte-equivalent to the legacy `selection_lock.json`, which remains safe for
-object-only compatibility. Each run also
-contains `config.resolved.yaml`, `command.txt`, `environment.json`,
-`manifest_refs.json`, `selection_lock.json` when applicable,
-`instances.parquet`, `exclusions.parquet`, `per_seed_metrics.csv`,
-`metrics.csv`, `summary.json`, `validation.json`, and resumable checkpoints.
-Attention, logit-lens, and probe findings are correlational. No causal,
-cross-model, or multilingual claim is made until its corresponding real GPU
-run is complete and validates successfully.
+## POS/Token-Class Linear Probes
+
+Gold teacher-forced selection trajectories fit fixed probes and held-out test
+trajectories evaluate them. The protocol covers four old mask ratios and all
+three relative depths, plus head-level attention-output features. It reports
+accuracy, macro-F1, class counts, majority, shuffled-label, and random-feature
+controls.
+
+The label inventory is `NOUN, VERB, ADJ, ADV, PREP, DET, PRON, CONJ`.
+Stanford's log-linear POS tagger supplies PTB tags, which are mapped into this
+inventory and inherited by every subtoken of a word. Special/out-of-inventory
+tokens are excluded. The original Stanford model and JAR were not supplied;
+the runner therefore requires `STANFORD_POS_TAGGER_JAR` and
+`STANFORD_POS_TAGGER_MODEL` and fails explicitly if absent. It never silently
+uses UD UPOS.
+
+## Native eventual-token and timing experiments
+
+Both native experiments use the preserved 24-prompt manifest: 12 reasoning and
+12 creative prompts. They store 64 pre-forward sequences, aligned final-layer
+argmax sequences, and eventual generated token IDs under temperature `.95`,
+top-p `.9`, length `96`, and random `1/(t+1)` reveal. Adapter alignment is
+explicit: Dream is unshifted (`0`) and DiffuLLaMA is shifted (`-1`).
+
+Final-Token Prediction by Layer evaluates still-masked positions against their
+eventual generated token at early/middle/late layers. Top-1 is primary;
+top-5, rank, and MRR are additional. The optional trained probe uses fixed
+settings and a prompt-held-out split with no tuning role.
+
+Prediction Before Unmasking reports refinement curves, masked fraction,
+argmax-at-unmask match, `found_time`, `unmask_time`, their difference,
+lead steps, before/exact-at-unmask percentages, task strata, and
+punctuation/function/content/number/whitespace classes.
+
+## DLA and causal ablation
+
+Direct Logit Attribution captures the actual concatenated value-weighted head
+tensor entering a Llama-style attention output projection. It selects only the
+requested head slice of `o_proj.weight`, obtains its additive residual
+contribution, then applies the model final norm and unembedding. It records
+target logit, rank, vocabulary percentile, target POS, relation selectivity,
+tensor shapes, and module paths. Unsupported architectures fail rather than
+approximate.
+
+Matched Relation-Head Ablation uses a forward pre-hook to zero exactly one
+requested input slice to `o_proj`, leaving every other head slice unchanged.
+It compares frozen selected heads with low-relation controls under matched
+sentence, target, timestep, visibility, and seed. POS-decodable versus lower
+POS-decoding controls run when an exact completed POS ranking directory is
+provided through `DLMREL_POS_HEAD_RANKINGS`; otherwise that source dependency
+is reported as blocked.
+
+## Heatmaps and multilingual extension
+
+Heatmap scoring first saves evidence, then plotting reads only the saved files.
+The preserved five qualitative sentences produce fully visible all-head grids
+and surface diagnostics. The first manifest-order example for each relation
+(not performance-selected) produces selected-head 64-step trajectories for
+all three seeds, masked/visible labels, direction, entropy titles, annotated
+spans, and PDF figures.
+
+Multilingual Relation-Head Transfer applies the matching model's English locks
+to German and Japanese without reselection. It provides fully visible and
+all-64-step evidence with the same visibility rule and finite-value checks.
+This is an extension, not an original-paper experiment.
+
+## Resume and artifacts
+
+Long sentence loops commit validated Parquet chunks every 300 input sentences.
+Checkpoint identity includes the scientific config, relevant manifests, seed,
+time coordinate, stage, heads, and sentence range. Corrected scientific hashes
+exclude development metadata. Native histories and other non-sentence evidence
+have dedicated resumable stages. Incompatible legacy locks and checkpoints are
+rejected.
+
+Legacy dev/permutation code remains importable only to validate or recover
+historical results. Canonical configs dispatch exclusively to modules named
+`paper_*.py`.

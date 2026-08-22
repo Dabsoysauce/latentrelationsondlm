@@ -15,6 +15,7 @@ _DTYPES = {
 
 class DreamAdapter(ModelAdapter, torch.nn.Module):
     mask_free = True
+    prediction_offset = 0
     capabilities = Capabilities(logits=True, hidden_states=True, attentions=True)
 
     def __init__(self, backbone, tokenizer, device: str):
@@ -44,9 +45,13 @@ class DreamAdapter(ModelAdapter, torch.nn.Module):
         )
         if getattr(out, "attentions", None) is None:
             raise RuntimeError("Dream returned no attention weights; load with attn_implementation='eager'.")
+        hidden = getattr(out, "last_hidden_state", None)
+        logits = getattr(out, "logits", None)
+        if logits is None and hidden is not None:
+            logits = self.get_logits(hidden)
         if output_hidden_states:
-            return None, out.attentions, out.hidden_states
-        return None, out.attentions
+            return logits, out.attentions, out.hidden_states
+        return logits, out.attentions
 
 
 def load(model_cfg: dict):

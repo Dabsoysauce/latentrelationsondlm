@@ -1,0 +1,19 @@
+id: relation_head_receiver_prediction
+type: relation_head_receiver_prediction
+track: confirmatory_ewt
+steps: 64
+normalized_progress: [1.0]
+seeds: [42, 43, 44]
+scoring:
+  attender_rows: last
+  receiver_span: source_argmax
+  top_k: 1
+  primary_relation: object_to_verb
+  primary_visibility: both_visible
+settings:
+  deterministic_selection_seed: 42
+  fully_visible_timestep: 63
+  selection_rule: direct_relation_winner
+  tie_break: [accuracy_desc, valid_instances_desc, layer_asc, head_asc]
+  receiver_method: last_attender_subtoken_single_source_argmax
+  score_test_heads: frozen_only
