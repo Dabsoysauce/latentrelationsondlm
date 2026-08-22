@@ -225,6 +225,9 @@ class RuntimeConfig:
     resume: bool = False
     dry_run: bool = False
     selection_lock: str | None = None
+    timestep_batch_size: int = 8
+    export_attention_cache: bool = False
+    attention_cache: str | None = None
 
 
 @dataclass(frozen=True)
@@ -244,6 +247,14 @@ class RunConfig:
         self.model.validate()
         self.dataset.validate()
         self.experiment.validate()
+        if self.runtime.timestep_batch_size < 1:
+            raise ConfigError("runtime timestep_batch_size must be positive")
+        if self.runtime.export_attention_cache and self.experiment.type != (
+            "relation_head_receiver_prediction_over_diffusion_time"
+        ):
+            raise ConfigError("attention-cache export is valid only for the relation time experiment")
+        if self.runtime.attention_cache and self.experiment.id != "attention_entropy":
+            raise ConfigError("attention-cache reuse is valid only for Attention Entropy")
         if self.track == "confirmatory_ewt" and self.dataset.id != "ewt":
             raise ConfigError("confirmatory_ewt track requires the EWT dataset")
         if self.track == "external_treebank_transfer" and self.dataset.id == "ewt":

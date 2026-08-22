@@ -15,6 +15,9 @@ settings:
   mask_ratios: [1.0, 0.75, 0.5, 0.25]
   label_inventory: [NOUN, VERB, ADJ, ADV, PREP, DET, PRON, CONJ]
   tagger_backend: stanford_loglinear_external
+  automatic_tagger_release: '4.2.0'
+  automatic_tagger_archive_sha256: sha256:0e900017c052114d30e688a6218e229551c045f6abb6907ba8a52b2a119bcb23
+  historical_tagger_release_recovered: false
   tagger_model_environment: STANFORD_POS_TAGGER_MODEL
   tagger_jar_environment: STANFORD_POS_TAGGER_JAR
   fixed_regularization_c: 1.0

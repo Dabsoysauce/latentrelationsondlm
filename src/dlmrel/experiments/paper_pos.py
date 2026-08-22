@@ -18,6 +18,7 @@ from ..data import load_manifest_examples
 from ..diffusion import state_at_time
 from ..models.decomposition import capture_projection_inputs
 from ..paper_protocol import map_relative_depths
+from ..stanford_pos import provision_stanford_pos, stanford_pos_identity
 from .shared import write_frames
 
 LABELS = ("NOUN", "VERB", "ADJ", "ADV", "PREP", "DET", "PRON", "CONJ")
@@ -47,10 +48,12 @@ def map_stanford_tag(tag: str) -> str | None:
 def _stanford_paths(settings: dict[str, Any]) -> tuple[Path, Path]:
     jar = os.environ.get(str(settings["tagger_jar_environment"]))
     model = os.environ.get(str(settings["tagger_model_environment"]))
+    if not jar and not model:
+        return provision_stanford_pos()
     if not jar or not model:
         raise RuntimeError(
-            "Exact POS replication is blocked: set STANFORD_POS_TAGGER_JAR and "
-            "STANFORD_POS_TAGGER_MODEL. UD UPOS is intentionally not substituted."
+            "Set both STANFORD_POS_TAGGER_JAR and STANFORD_POS_TAGGER_MODEL, or "
+            "unset both so the pinned Stanford 4.2.0 package can be installed automatically."
         )
     jar_path, model_path = Path(jar), Path(model)
     if not jar_path.is_file() or not model_path.is_file():
@@ -112,9 +115,12 @@ def stanford_labels(examples, settings: dict[str, Any]) -> dict[str, list[str | 
 def _forward_features(model, state, depth_rows):
     layers = [int(row["actual_layer_index"]) for row in depth_rows]
     with capture_projection_inputs(model, layers) as (captures, metadata):
-        _logits, _attentions, hidden_states = model.forward_attentions(
-            state.input_ids, output_hidden_states=True
-        )
+        if hasattr(model, "forward_features"):
+            _attentions, hidden_states = model.forward_features(state.input_ids)
+        else:
+            _logits, _attentions, hidden_states = model.forward_attentions(
+                state.input_ids, output_hidden_states=True
+            )
     output = {}
     for depth in depth_rows:
         layer = int(depth["actual_layer_index"])
@@ -234,7 +240,8 @@ def _evaluate(fitted, train: pd.DataFrame, test: pd.DataFrame, *, seed: int):
 
 def run(model, tokenizer, cfg: RunConfig, run_dir: Path, **_unused: Any) -> dict[str, Any]:
     settings = cfg.experiment.settings
-    _stanford_paths(settings)  # fail before touching any held-out data
+    jar_path, tagger_model_path = _stanford_paths(settings)
+    tagger_identity = stanford_pos_identity(jar_path, tagger_model_path)
     selection, selection_exclusions = load_manifest_examples(cfg, tokenizer, "select")
     selection_labels = stanford_labels(selection, settings)
     if not selection:
@@ -351,6 +358,9 @@ def run(model, tokenizer, cfg: RunConfig, run_dir: Path, **_unused: Any) -> dict
         "development_used": False,
         "test_tuning_used": False,
         "tagger_backend": "stanford_loglinear_external",
+        "tagger_dependency": tagger_identity,
+        "tagger_auto_provision_supported": True,
+        "historical_release_recovered": False,
         "ud_upos_substituted": False,
         "label_inventory": list(LABELS),
         "relative_depths": depths,

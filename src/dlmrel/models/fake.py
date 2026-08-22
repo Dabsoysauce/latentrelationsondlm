@@ -62,6 +62,13 @@ class FakeAdapter(ModelAdapter):
             return output.logits, output.attentions, output.hidden_states
         return output.logits, output.attentions
 
+    def forward_attentions_only(self, input_ids: torch.Tensor):
+        return self.forward(input_ids).attentions
+
+    def forward_features(self, input_ids: torch.Tensor):
+        output = self.forward(input_ids)
+        return output.attentions, output.hidden_states
+
     def projection_input(self, input_ids: torch.Tensor, layer: int) -> torch.Tensor:
         """Deterministic concatenated-head values for exact decomposition tests."""
         if not 0 <= layer < self.layers:

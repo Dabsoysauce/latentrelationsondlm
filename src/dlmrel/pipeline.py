@@ -195,12 +195,23 @@ def run_real(cfg: RunConfig, run_dir: Path, manifest_hashes: dict[str, str]) -> 
         from .experiments.paper_relation import run_time_or_transfer
 
         details = run_time_or_transfer(
-            model, tokenizer, cfg, run_dir, source_locks=source_locks
+            model,
+            tokenizer,
+            cfg,
+            run_dir,
+            source_locks=source_locks,
+            model_metadata=model_metadata,
         )
     elif cfg.experiment.type == "attention_entropy" and cfg.experiment.id == "attention_entropy":
         from .experiments.paper_entropy import run
 
-        details = run(model, tokenizer, cfg, run_dir)
+        details = run(
+            model,
+            tokenizer,
+            cfg,
+            run_dir,
+            manifest_hashes=manifest_hashes,
+        )
     elif cfg.experiment.type == "pos_token_class_linear_probes":
         from .experiments.paper_pos import run
 
@@ -237,7 +248,13 @@ def run_real(cfg: RunConfig, run_dir: Path, manifest_hashes: dict[str, str]) -> 
         from .experiments.paper_relation import run_time_or_transfer
 
         details = run_time_or_transfer(
-            model, tokenizer, cfg, run_dir, source_locks=source_locks, transfer=True
+            model,
+            tokenizer,
+            cfg,
+            run_dir,
+            source_locks=source_locks,
+            transfer=True,
+            model_metadata=model_metadata,
         )
     elif cfg.experiment.type == "head_search":
         from .experiments.head_search import run

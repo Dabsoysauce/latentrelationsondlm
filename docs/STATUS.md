@@ -25,9 +25,11 @@ implementation validation.
 - Exact entropy early/late boundaries were not recoverable from the supplied
   notebook/CSVs. Config freezes `0..15` and `48..63` and labels the
   limitation in every summary.
-- The old Stanford log-linear tagger model/JAR were not included. Exact POS
-  runs require external paths in `STANFORD_POS_TAGGER_JAR` and
-  `STANFORD_POS_TAGGER_MODEL`; no UD-UPOS substitution is made.
+- The old Stanford log-linear tagger release was not recoverable. Runs now
+  auto-provision the official 4.2.0 archive and recommended English model with
+  frozen archive/JAR/model checksums. This removes the manual dependency but
+  does not prove that 4.2.0 was the historical release. No UD-UPOS substitution
+  is made.
 - POS-head causal comparison requires a completed exact POS run supplied
   through `DLMREL_POS_HEAD_RANKINGS`.
 - The local research-context index named several `context/*.md` files, but
@@ -36,3 +38,13 @@ implementation validation.
 
 Existing result directories, notebooks, Drive data, Modal infrastructure, and
 historical IDs are not overwritten by corrected runs.
+
+## Runtime optimizations
+
+The attention-only adapters omit the hidden-to-vocabulary projection. The
+64-step relation, entropy, German, and Japanese trajectories forward up to
+eight same-sentence states per GPU call while preserving the individual state
+rows. The English relation-time run can export entropy checkpoints from those
+same attentions, eliminating the second 188-state-per-sentence model pass for
+Attention Entropy. CPU equivalence tests compare batch size one and eight row
+for row.

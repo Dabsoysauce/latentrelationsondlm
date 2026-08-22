@@ -48,6 +48,11 @@ timestep and the old two-way visibility split:
 One revealed piece immediately leaves `both_masked`. The configured minimum
 masked-instance cutoff is reported alongside raw denominators.
 
+Execution microbatches consecutive states from one already-materialized nested
+trajectory. The state IDs, seed-reset schedule, scoring order, and outputs are
+unchanged. For seeds 43 and 44, deterministic endpoints are removed before the
+GPU call rather than computed and discarded afterward.
+
 ## Attention Entropy
 
 Attention Entropy uses gold teacher-forced trajectories, all 64 steps, all
@@ -62,6 +67,12 @@ The active config freezes inclusive windows `0..15` and `48..63` and labels
 that choice as a provenance limitation rather than presenting it as recovered
 fact.
 
+When requested, the English relation-time runner computes these exact entropy
+rows from the attentions already in memory and stores them under a separate
+validated checkpoint identity. Attention Entropy may reuse only a completed
+cache with the same model revision, tokenizer revision, test manifest, relative
+depth mapping, seeds, and timestep coverage. Otherwise it fails closed.
+
 ## POS/Token-Class Linear Probes
 
 Gold teacher-forced selection trajectories fit fixed probes and held-out test
@@ -73,10 +84,14 @@ controls.
 The label inventory is `NOUN, VERB, ADJ, ADV, PREP, DET, PRON, CONJ`.
 Stanford's log-linear POS tagger supplies PTB tags, which are mapped into this
 inventory and inherited by every subtoken of a word. Special/out-of-inventory
-tokens are excluded. The original Stanford model and JAR were not supplied;
-the runner therefore requires `STANFORD_POS_TAGGER_JAR` and
-`STANFORD_POS_TAGGER_MODEL` and fails explicitly if absent. It never silently
-uses UD UPOS.
+tokens are excluded. The original Stanford model and JAR were not supplied.
+The runner downloads Stanford tagger 4.2.0 and its
+`english-left3words-distsim` model into a cache, verifies the archive, JAR, and
+model with frozen SHA-256 values, and sets the two required paths automatically.
+Explicit `STANFORD_POS_TAGGER_JAR` and `STANFORD_POS_TAGGER_MODEL` paths still
+override the cache. It never silently uses UD UPOS. The exact historical
+Stanford release remains unrecovered, so 4.2.0 is recorded as a frozen
+reproducible dependency, not claimed as the original release.
 
 ## Native eventual-token and timing experiments
 
@@ -131,6 +146,8 @@ This is an extension, not an original-paper experiment.
 ## Resume and artifacts
 
 Long sentence loops commit validated Parquet chunks every 300 input sentences.
+The shared relation/entropy trajectory uses 20-sentence chunks to bound the
+much larger entropy table in memory.
 Checkpoint identity includes the scientific config, relevant manifests, seed,
 time coordinate, stage, heads, and sentence range. Corrected scientific hashes
 exclude development metadata. Native histories and other non-sentence evidence

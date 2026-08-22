@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shlex
 import sys
 from dataclasses import asdict, replace
@@ -62,6 +63,9 @@ def resolve_run(args) -> RunConfig:
         resume=args.resume,
         dry_run=args.dry_run,
         selection_lock=args.selection_lock,
+        timestep_batch_size=args.timestep_batch_size,
+        export_attention_cache=args.export_attention_cache,
+        attention_cache=args.attention_cache,
     )
     return RunConfig.load_files(args.model, args.dataset, args.experiment, runtime=runtime)
 
@@ -181,13 +185,27 @@ def work_estimate(cfg: RunConfig) -> dict:
         )
     sentences = sum(counts.values()) if counts else "unknown_until_prepare"
     steps = len(cfg.experiment.normalized_progress)
+    logical_forward_states = (
+        sentences if isinstance(sentences, str) else sentences * steps * len(cfg.experiment.seeds)
+    )
+    model_forward_calls = logical_forward_states
+    if isinstance(sentences, int) and cfg.experiment.type in {
+        "relation_head_receiver_prediction_over_diffusion_time",
+        "attention_entropy",
+        "multilingual_relation_head_transfer",
+    }:
+        size = cfg.runtime.timestep_batch_size
+        per_sentence = math.ceil(64 / size) + 2 * math.ceil(62 / size)
+        model_forward_calls = 0 if cfg.runtime.attention_cache else sentences * per_sentence
     return {
         "sentences": sentences,
         "trajectory_points": steps,
         "seeds": len(cfg.experiment.seeds),
-        "estimated_forward_passes": (
-            sentences if isinstance(sentences, str) else sentences * steps * len(cfg.experiment.seeds)
-        ),
+        "estimated_forward_passes": logical_forward_states,
+        "logical_forward_states": logical_forward_states,
+        "timestep_batch_size": cfg.runtime.timestep_batch_size,
+        "estimated_model_forward_calls": model_forward_calls,
+        "attention_cache_reused": bool(cfg.runtime.attention_cache),
     }
 
 
@@ -361,6 +379,21 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--run-id")
     run.add_argument("--resume", action="store_true")
     run.add_argument("--selection-lock")
+    run.add_argument(
+        "--timestep-batch-size",
+        type=int,
+        default=8,
+        help="number of equal-length trajectory states forwarded together",
+    )
+    run.add_argument(
+        "--export-attention-cache",
+        action="store_true",
+        help="save entropy rows while running the English relation trajectory",
+    )
+    run.add_argument(
+        "--attention-cache",
+        help="completed English time-trajectory run whose entropy cache should be reused",
+    )
     run.add_argument("--dry-run", action="store_true")
     run.set_defaults(func=cmd_run)
 

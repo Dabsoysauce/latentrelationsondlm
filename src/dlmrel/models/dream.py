@@ -53,6 +53,32 @@ class DreamAdapter(ModelAdapter, torch.nn.Module):
             return logits, out.attentions, out.hidden_states
         return logits, out.attentions
 
+    @torch.no_grad()
+    def forward_attentions_only(self, input_ids):
+        out = self.backbone(
+            input_ids=input_ids,
+            attention_mask=None,
+            output_attentions=True,
+            output_hidden_states=False,
+            return_dict=True,
+        )
+        if getattr(out, "attentions", None) is None:
+            raise RuntimeError("Dream returned no attention weights; load with attn_implementation='eager'.")
+        return out.attentions
+
+    @torch.no_grad()
+    def forward_features(self, input_ids):
+        out = self.backbone(
+            input_ids=input_ids,
+            attention_mask=None,
+            output_attentions=True,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        if getattr(out, "attentions", None) is None or getattr(out, "hidden_states", None) is None:
+            raise RuntimeError("Dream returned incomplete attention/hidden-state features")
+        return out.attentions, out.hidden_states
+
 
 def load(model_cfg: dict):
     from transformers import AutoModel, AutoTokenizer

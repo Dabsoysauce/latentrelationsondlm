@@ -15,21 +15,26 @@ from ..config import RELATION_NAMES, RunConfig
 from ..controls import receiver_controls
 from ..data import load_manifest_examples
 from ..diffusion import (
+    attention_batches_for_states,
     attentions_at_time,
-    attentions_for_state,
     receiver_predictions,
     teacher_forced_trajectory,
 )
 from ..paper_protocol import (
     PaperLockSet,
+    attention_entropy_rows,
     choose_selection_winners,
     load_selection_bundle,
+    map_relative_depths,
     paper_visibility_group,
     receiver_is_correct,
     write_resolved_selection_locks,
     write_selection_bundle,
 )
 from .shared import aggregate_head_scores, instance_metadata, write_frames
+
+ATTENTION_CACHE_STAGE = "paper-shared-attention-entropy-trajectory"
+ATTENTION_CACHE_CHUNK_SIZE = 20
 
 
 def _code_hash() -> str:
@@ -58,6 +63,7 @@ def _score_state(
     timestep: int,
     available_heads: set[tuple[int, int]] | None,
     locks: PaperLockSet | None,
+    batch_index: int = 0,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     all_heads = available_heads or {
@@ -85,6 +91,7 @@ def _score_state(
                 attender_token="last",
                 exclude_bos=True,
                 exclude_self=True,
+                batch_index=batch_index,
             )
             for head in sorted(
                 candidate_head
@@ -108,7 +115,12 @@ def _score_state(
                         "gold_receiver_word_idx": instance.receiver_word_idx,
                         "correct": int(receiver_is_correct(source, instance.receiver_span)),
                         "gold_attention_max": float(
-                            attentions[layer][0, head, instance.attender_span[-1], instance.receiver_span]
+                            attentions[layer][
+                                batch_index,
+                                head,
+                                instance.attender_span[-1],
+                                instance.receiver_span,
+                            ]
                             .float()
                             .max()
                         ),
@@ -271,29 +283,90 @@ def _validate_locked_rows(rows: pd.DataFrame, locks: PaperLockSet) -> None:
             raise ArtifactError(f"held-out rows violate frozen lock for {relation}")
 
 
-def score_time_chunk(model, tokenizer, examples, *, seed: int, locks: PaperLockSet) -> pd.DataFrame:
-    rows = []
+def score_time_and_entropy_chunk(
+    model,
+    tokenizer,
+    examples,
+    *,
+    seed: int,
+    locks: PaperLockSet,
+    batch_size: int,
+    depth_rows=None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    relation_rows = []
+    entropy_rows = []
     for example in examples:
         states = teacher_forced_trajectory(
             model, tokenizer, example.text, steps=64, seed=seed, include_bos=True
         )
-        for timestep, state in enumerate(states):
-            if timestep in {0, 63} and seed != 42:
-                continue
-            attentions = attentions_for_state(model, state)
-            rows.extend(
-                _score_state(
-                    example,
-                    attentions,
-                    state.is_visible,
-                    role="test",
-                    seed=seed,
-                    timestep=timestep,
-                    available_heads=locks.heads,
-                    locks=locks,
+        indexed_states = [
+            (timestep, state)
+            for timestep, state in enumerate(states)
+            if seed == 42 or timestep not in {0, 63}
+        ]
+        for start, current, attentions in attention_batches_for_states(
+            model,
+            [state for _timestep, state in indexed_states],
+            batch_size=batch_size,
+        ):
+            for batch_index, state in enumerate(current):
+                timestep = indexed_states[start + batch_index][0]
+                relation_rows.extend(
+                    _score_state(
+                        example,
+                        attentions,
+                        state.is_visible,
+                        role="test",
+                        seed=seed,
+                        timestep=timestep,
+                        available_heads=locks.heads,
+                        locks=locks,
+                        batch_index=batch_index,
+                    )
                 )
-            )
-    return pd.DataFrame(rows)
+                for depth in depth_rows or ():
+                    layer = int(depth["actual_layer_index"])
+                    values = attention_entropy_rows(
+                        attentions[layer][batch_index].detach().float().cpu().numpy()
+                    )
+                    for head, entropy in enumerate(values):
+                        entropy_rows.append(
+                            {
+                                "sentence_id": example.sentence_id,
+                                "treebank": example.source,
+                                "seed": seed,
+                                "timestep": timestep,
+                                "normalized_progress": timestep / 63,
+                                **depth,
+                                "layer": layer,
+                                "head": head,
+                                "entropy_normalized": float(entropy),
+                                "n_masked": state.n_masked,
+                                "bos_query_excluded": True,
+                                "bos_source_retained": True,
+                            }
+                        )
+    return pd.DataFrame(relation_rows), pd.DataFrame(entropy_rows)
+
+
+def score_time_chunk(
+    model,
+    tokenizer,
+    examples,
+    *,
+    seed: int,
+    locks: PaperLockSet,
+    batch_size: int = 8,
+) -> pd.DataFrame:
+    relation, _entropy = score_time_and_entropy_chunk(
+        model,
+        tokenizer,
+        examples,
+        seed=seed,
+        locks=locks,
+        batch_size=batch_size,
+    )
+    return relation
 
 
 def _time_metrics(raw: pd.DataFrame, minimum_masked_instances: int) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -328,10 +401,23 @@ def run_time_or_transfer(
     *,
     source_locks: PaperLockSet,
     transfer: bool = False,
+    model_metadata: dict[str, Any] | None = None,
     **_unused: Any,
 ) -> dict[str, Any]:
     examples, exclusions = load_manifest_examples(cfg, tokenizer, "test")
-    store = SentenceCheckpointStore(run_dir)
+    export_entropy = bool(cfg.runtime.export_attention_cache)
+    if export_entropy and (transfer or cfg.dataset.id != "ewt"):
+        raise ArtifactError("attention-cache export is supported only by the English time curve")
+    depth_rows = None
+    if export_entropy:
+        number_of_layers = int((model_metadata or {}).get("n_layers", 0))
+        if number_of_layers < 1:
+            raise ArtifactError("attention-cache export requires model layer metadata")
+        depth_rows = map_relative_depths(number_of_layers)
+    store = SentenceCheckpointStore(
+        run_dir,
+        chunk_size=ATTENTION_CACHE_CHUNK_SIZE if export_entropy else 300,
+    )
     frames = []
     for seed in cfg.experiment.seeds:
         identity = CheckpointIdentity(
@@ -341,15 +427,45 @@ def run_time_or_transfer(
             timestep=-1,
             heads=tuple(sorted(source_locks.heads)),
         )
-        frames.append(
-            store.run(
+        if export_entropy:
+            cache_identity = CheckpointIdentity(
+                stage=ATTENTION_CACHE_STAGE,
+                seed=seed,
+                normalized_progress=-1.0,
+                timestep=-1,
+            )
+            seed_frames = []
+            for relation_frame, _entropy_frame in store.iter_paired_chunks(
                 examples,
                 identity,
-                lambda chunk, _start, current_seed=seed: score_time_chunk(
-                    model, tokenizer, chunk, seed=current_seed, locks=source_locks
+                cache_identity,
+                lambda chunk, _start, current_seed=seed: score_time_and_entropy_chunk(
+                    model,
+                    tokenizer,
+                    chunk,
+                    seed=current_seed,
+                    locks=source_locks,
+                    batch_size=cfg.runtime.timestep_batch_size,
+                    depth_rows=depth_rows,
                 ),
+            ):
+                seed_frames.append(relation_frame)
+            frames.append(pd.concat(seed_frames, ignore_index=True))
+        else:
+            frames.append(
+                store.run(
+                    examples,
+                    identity,
+                    lambda chunk, _start, current_seed=seed: score_time_chunk(
+                        model,
+                        tokenizer,
+                        chunk,
+                        seed=current_seed,
+                        locks=source_locks,
+                        batch_size=cfg.runtime.timestep_batch_size,
+                    ),
+                )
             )
-        )
     raw = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     if not np.isfinite(raw["correct"].astype(float)).all():
         raise ArtifactError("nonfinite locked-head transfer evidence")
@@ -372,6 +488,11 @@ def run_time_or_transfer(
         "minimum_masked_instances": minimum,
         "test_sentences": len(examples),
         "transfer_extension": transfer,
+        "timestep_microbatch_size": cfg.runtime.timestep_batch_size,
+        "vocabulary_logits_computed_for_attention_only_passes": False,
+        "attention_entropy_cache_exported": export_entropy,
+        "attention_entropy_cache_stage": ATTENTION_CACHE_STAGE if export_entropy else None,
+        "attention_entropy_cache_relative_depths": depth_rows,
     }
 
 

@@ -202,6 +202,50 @@ class WrappedAdapter(ModelAdapter, torch.nn.Module):
             return self.get_logits(out.last_hidden_state), out.attentions, out.hidden_states
         return self.get_logits(out.last_hidden_state), out.attentions
 
+    @torch.no_grad()
+    def forward_attentions_only(self, input_ids):
+        from model import get_anneal_attn_mask
+
+        embeds = self.get_embeds(input_ids)
+        mask = get_anneal_attn_mask(
+            seq_len=input_ids.shape[1],
+            bsz=input_ids.shape[0],
+            dtype=embeds.dtype,
+            device=input_ids.device,
+            attn_mask_ratio=1.0,
+        )
+        out = self.denoise_model(
+            inputs_embeds=embeds,
+            attention_mask=mask,
+            output_attentions=True,
+            output_hidden_states=False,
+            return_dict=True,
+            use_cache=False,
+        )
+        return out.attentions
+
+    @torch.no_grad()
+    def forward_features(self, input_ids):
+        from model import get_anneal_attn_mask
+
+        embeds = self.get_embeds(input_ids)
+        mask = get_anneal_attn_mask(
+            seq_len=input_ids.shape[1],
+            bsz=input_ids.shape[0],
+            dtype=embeds.dtype,
+            device=input_ids.device,
+            attn_mask_ratio=1.0,
+        )
+        out = self.denoise_model(
+            inputs_embeds=embeds,
+            attention_mask=mask,
+            output_attentions=True,
+            output_hidden_states=True,
+            return_dict=True,
+            use_cache=False,
+        )
+        return out.attentions, out.hidden_states
+
 
 def load_diffullama(model_cfg: dict, adapter_cls):
     code_revision = model_cfg["remote_code_revision"]

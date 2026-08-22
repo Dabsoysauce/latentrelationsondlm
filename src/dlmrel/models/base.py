@@ -53,6 +53,23 @@ class ModelAdapter(ABC):
     @abstractmethod
     def forward_attentions(self, input_ids: torch.Tensor, output_hidden_states: bool = False): ...
 
+    def forward_attentions_only(self, input_ids: torch.Tensor):
+        """Return attentions without requiring an adapter to unembed logits.
+
+        The default keeps third-party/test adapters compatible.  Real adapters
+        override this method so attention-only experiments do not pay for the
+        large hidden-to-vocabulary projection.
+        """
+        _logits, attentions = self.forward_attentions(input_ids)
+        return attentions
+
+    def forward_features(self, input_ids: torch.Tensor):
+        """Return attentions and hidden states without requiring logits."""
+        _logits, attentions, hidden_states = self.forward_attentions(
+            input_ids, output_hidden_states=True
+        )
+        return attentions, hidden_states
+
     def get_logits(self, hidden_state: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 

@@ -63,13 +63,17 @@ dlmrel run \
   --selection-lock /path/to/relation-run/selection-locks \
   --results /path/to/results/dream \
   --run-id paper-v1-dream-relation-time \
+  --timestep-batch-size 8 \
+  --export-attention-cache \
   --resume
 ```
 
-Every costly sentence loop retains atomic 300-sentence checkpoints. Native
-trajectory, entropy, POS, DLA, ablation, and heatmap evidence have
-experiment-specific resumable identities. Completed runs cannot be silently
-overwritten.
+The 64-step attention runners microbatch equal-length states and do not compute
+unused vocabulary logits. The English relation-time run can checkpoint entropy
+rows from the same forwards; pass its completed run directory to Attention
+Entropy with `--attention-cache`. Ordinary sentence loops retain atomic
+300-sentence checkpoints, while the larger shared trajectory cache uses
+20-sentence chunks. Completed runs cannot be silently overwritten.
 
 See [the frozen protocol](docs/PROTOCOL.md), [GPU running
 instructions](docs/RUNNING.md), and [implementation status](docs/STATUS.md).
