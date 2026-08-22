@@ -90,11 +90,15 @@ def test_prompt_manifest_preserves_twelve_reasoning_and_twelve_creative():
 def test_both_colab_notebooks_are_valid_thin_restart_safe_launchers():
     names = ["Dream_Paper_Experiments.ipynb", "DiffuLLaMA_Paper_Experiments.ipynb"]
     rendered = []
+    pins = []
     for name in names:
         notebook = json.loads((ROOT / "notebooks" / name).read_text())
         assert notebook["nbformat"] == 4
         sources = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
         rendered.append(sources)
+        pin = re.search(r'^GIT_COMMIT = "([0-9a-f]{40})"$', sources, re.MULTILINE)
+        assert pin is not None
+        pins.append(pin.group(1))
         for experiment_id in PAPER_EXPERIMENT_TYPES:
             assert experiment_id in sources
         for required in (
@@ -123,6 +127,7 @@ def test_both_colab_notebooks_are_valid_thin_restart_safe_launchers():
                 ast.parse("".join(cell["source"]))
     assert "dlmrel-paper-results\" / \"dream" in rendered[0]
     assert "dlmrel-paper-results\" / \"diffullama" in rendered[1]
+    assert pins == [pins[0], pins[0]]
 
 
 def test_fake_cli_runs_and_validates_all_ten_canonical_experiments(tmp_path, capsys):
