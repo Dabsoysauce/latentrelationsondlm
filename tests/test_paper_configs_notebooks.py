@@ -66,6 +66,8 @@ def test_pos_protocol_is_multi_depth_multi_mask_fixed_and_has_no_tuning_role():
     assert raw["settings"]["label_inventory"] == [
         "NOUN", "VERB", "ADJ", "ADV", "PREP", "DET", "PRON", "CONJ"
     ]
+    assert raw["settings"]["automatic_tagger_release"] == "4.2.0"
+    assert raw["settings"]["historical_tagger_release_recovered"] is False
 
 
 def test_corrected_runner_modules_have_no_development_load_or_inference_calls():
@@ -115,6 +117,11 @@ def test_both_colab_notebooks_are_valid_thin_restart_safe_launchers():
             "--resume",
             "validate-selection-locks",
             "selection-locks",
+            "--timestep-batch-size",
+            "--export-attention-cache",
+            "--attention-cache",
+            "DLMREL_STANFORD_POS_CACHE",
+            "TIME_RUN",
             "RUN_EXPENSIVE = False",
             "summary.json",
             "summarize",
@@ -127,7 +134,10 @@ def test_both_colab_notebooks_are_valid_thin_restart_safe_launchers():
                 ast.parse("".join(cell["source"]))
     assert "dlmrel-paper-results\" / \"dream" in rendered[0]
     assert "dlmrel-paper-results\" / \"diffullama" in rendered[1]
-    assert pins == [pins[0], pins[0]]
+    assert pins == [
+        "8a56e00b1dbec4081caf1f288fec02d8da2dd600",
+        "8a56e00b1dbec4081caf1f288fec02d8da2dd600",
+    ]
 
 
 def test_fake_cli_runs_and_validates_all_ten_canonical_experiments(tmp_path, capsys):
