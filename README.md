@@ -52,6 +52,8 @@ dlmrel run \
 
 dlmrel validate-selection-locks \
   --model configs/models/dream_7b.yaml \
+  --dataset configs/datasets/ewt.yaml \
+  --experiment configs/experiments/relation_head_receiver_prediction.yaml \
   --selection-lock /path/to/relation-run/selection-locks
 
 dlmrel run \
