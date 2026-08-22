@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import pickle
 import subprocess
 import tempfile
 from collections import Counter
+from gc import collect
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,31 @@ from ..stanford_pos import provision_stanford_pos, stanford_pos_identity
 from .shared import write_frames
 
 LABELS = ("NOUN", "VERB", "ADJ", "ADV", "PREP", "DET", "PRON", "CONJ")
+
+
+def _frozen_probe_path(run_dir: Path, key: tuple[Any, ...]) -> Path:
+    seed, progress, relative_label, feature_kind = key
+    return run_dir / "frozen-probes" / (
+        f"seed-{seed}__p-{progress:.6f}__depth-{relative_label}__feature-{feature_kind}.pkl"
+    )
+
+
+def _write_frozen_probe(path: Path, key: tuple[Any, ...], fitted: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("wb") as handle:
+        pickle.dump({"key": key, "fitted": fitted}, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def _load_frozen_probe(path: Path, key: tuple[Any, ...]) -> Any:
+    with path.open("rb") as handle:
+        payload = pickle.load(handle)
+    if payload.get("key") != key:
+        raise RuntimeError(f"frozen POS probe identity mismatch: {path}")
+    return payload["fitted"]
 
 
 def map_stanford_tag(tag: str) -> str | None:
@@ -201,7 +228,7 @@ def _fit(frame: pd.DataFrame, *, seed: int, regularization: float):
     return scaler, classifier, x, y
 
 
-def _evaluate(fitted, train: pd.DataFrame, test: pd.DataFrame, *, seed: int):
+def _evaluate(fitted, _train: pd.DataFrame | None, test: pd.DataFrame, *, seed: int):
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import accuracy_score, f1_score
 
@@ -254,7 +281,6 @@ def run(model, tokenizer, cfg: RunConfig, run_dir: Path, **_unused: Any) -> dict
     pd.DataFrame(depths).to_csv(run_dir / "relative_depth_mapping.csv", index=False)
     store = SentenceCheckpointStore(run_dir)
     frozen = {}
-    selection_frames = {}
     regularization = float(settings["fixed_regularization_c"])
     for seed in cfg.experiment.seeds:
         for progress in cfg.experiment.normalized_progress:
@@ -282,8 +308,18 @@ def run(model, tokenizer, cfg: RunConfig, run_dir: Path, **_unused: Any) -> dict
                 ["relative_label", "feature_kind"], observed=True
             ):
                 key = (seed, progress, *identity_values)
-                selection_frames[key] = group
-                frozen[key] = _fit(group, seed=seed, regularization=regularization)
+                probe_path = _frozen_probe_path(run_dir, key)
+                if probe_path.is_file():
+                    fitted = _load_frozen_probe(probe_path, key)
+                    del fitted
+                else:
+                    fitted = _fit(group, seed=seed, regularization=regularization)
+                    _write_frozen_probe(probe_path, key, fitted)
+                    del fitted
+                frozen[key] = probe_path
+                collect()
+            del frame
+            collect()
 
     # No test manifest, labels, or features are opened before every probe is frozen.
     test, test_exclusions = load_manifest_examples(cfg, tokenizer, "test")
@@ -315,9 +351,9 @@ def run(model, tokenizer, cfg: RunConfig, run_dir: Path, **_unused: Any) -> dict
                 ["relative_label", "feature_kind"], observed=True
             ):
                 key = (seed, progress, *identity_values)
-                evidence, metrics = _evaluate(
-                    frozen[key], selection_frames[key], group, seed=seed
-                )
+                fitted = _load_frozen_probe(frozen[key], key)
+                evidence, metrics = _evaluate(fitted, None, group, seed=seed)
+                del fitted
                 evidence_frames.append(evidence)
                 metric_rows.append(
                     {
@@ -329,6 +365,9 @@ def run(model, tokenizer, cfg: RunConfig, run_dir: Path, **_unused: Any) -> dict
                         **metrics,
                     }
                 )
+                collect()
+            del frame
+            collect()
     raw = pd.concat(evidence_frames, ignore_index=True)
     per_seed = pd.DataFrame(metric_rows)
     exclusions = pd.concat([selection_exclusions, test_exclusions], ignore_index=True)
