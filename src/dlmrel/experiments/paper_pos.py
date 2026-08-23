@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import torch
 
 from ..checkpoints import CheckpointIdentity, SentenceCheckpointStore
 from ..config import RunConfig
@@ -141,6 +142,55 @@ def _forward_features(model, state, depth_rows):
     return output
 
 
+def _eligible_words(example, state, labels):
+    """Words whose whole sub-token span is still masked, in word_to_tokens order."""
+    eligible = []
+    for word_index, span in example.word_to_tokens.items():
+        label = labels[word_index]
+        if label is None or not span or any(state.is_visible[position] for position in span):
+            continue
+        eligible.append((word_index, span, label))
+    return eligible
+
+
+def _span_means(features, spans):
+    """Reduce every span on-device, then move each feature tensor across once.
+
+    The per-span arithmetic is untouched: each entry is still
+    ``values[span].float().mean(dim=0)`` over the same sub-token indices in the
+    same order, so results are bitwise identical to computing them one at a
+    time. Only the host transfer changes. Previously every individual feature
+    vector was moved with its own ``.cpu()``, which forces a full device
+    synchronization per (word, depth, feature kind) -- on the order of a
+    thousand synchronizations per sentence. Now one transfer carries every
+    word's vector for a given feature tensor.
+    """
+    reduced = {}
+    for key, values in features.items():
+        if not spans:
+            reduced[key] = []
+            continue
+        stacked = torch.stack([values[span].float().mean(dim=0) for span in spans])
+        reduced[key] = stacked.cpu().tolist()
+    return reduced
+
+
+def _depth_feature_order(features, depth_rows):
+    """Feature keys per depth, preserving the insertion order of `features`.
+
+    Row order is load-bearing: `_evaluate` shuffles the training labels in the
+    order they are stored, so the shuffled-label control changes if rows are
+    emitted in a different sequence. This reproduces the original
+    word -> depth -> (residual, head_0, head_1, ...) ordering while removing the
+    quadratic rescan of every feature key for every depth.
+    """
+    order = {str(depth["relative_label"]): [] for depth in depth_rows}
+    for relative_label, feature_kind in features:
+        if relative_label in order:
+            order[relative_label].append((relative_label, feature_kind))
+    return order
+
+
 def feature_rows(
     model,
     tokenizer,
@@ -151,6 +201,7 @@ def feature_rows(
     progress: float,
     depth_rows,
     role: str,
+    features_by_sentence: dict[str, dict] | None = None,
 ) -> pd.DataFrame:
     rows = []
     timestep = round(progress * 63)
@@ -160,14 +211,12 @@ def feature_rows(
         )
         features = _forward_features(model, state, depth_rows)
         labels = labels_by_sentence[example.sentence_id]
-        for word_index, span in example.word_to_tokens.items():
-            label = labels[word_index]
-            if label is None or not span or any(state.is_visible[position] for position in span):
-                continue
+        eligible = _eligible_words(example, state, labels)
+        reduced = _span_means(features, [span for _index, span, _label in eligible])
+        per_depth = _depth_feature_order(features, depth_rows)
+        for position, (word_index, _span, label) in enumerate(eligible):
             for depth in depth_rows:
-                for (relative_label, feature_kind), values in features.items():
-                    if relative_label != depth["relative_label"]:
-                        continue
+                for key in per_depth[str(depth["relative_label"])]:
                     rows.append(
                         {
                             "sentence_id": example.sentence_id,
@@ -176,11 +225,11 @@ def feature_rows(
                             "timestep": timestep,
                             "normalized_progress": progress,
                             **depth,
-                            "feature_kind": feature_kind,
+                            "feature_kind": key[1],
                             "word_index": word_index,
                             "form": example.tokens[word_index],
                             "label": label,
-                            "feature": values[span].float().mean(dim=0).cpu().tolist(),
+                            "feature": reduced[key][position],
                         }
                     )
     return pd.DataFrame(rows)
