@@ -128,52 +128,73 @@ def _native_depth_mapping(model, input_ids: torch.Tensor, settings):
     return map_relative_depths(len(attentions), settings["relative_depths"])
 
 
-def final_token_rows(model, row, depths, *, collect_probe_features: bool):
+def final_token_rows(model, row, depths, *, collect_probe_features: bool, batch_size: int = 8):
+    """Score every timestep's pre-forward state, batching equal-length states.
+
+    A native trajectory's 64 pre-forward states share one fixed sequence
+    length throughout generation, so they can be forwarded together instead
+    of one state per model call. Batching changes only execution shape: the
+    per-position evidence computed below is identical either way, since each
+    item's hidden state, logits, and rank are sliced out independently before
+    any of the downstream arithmetic runs.
+    """
+    if batch_size < 1:
+        raise ValueError("final-token batch_size must be positive")
     final_ids = torch.tensor(row.final_ids, dtype=torch.long, device=model.device)
     mask_id = int(model.tokenizer.mask_token_id)
     result, features = [], []
-    for timestep, state_ids in enumerate(row.pre_forward_ids):
-        state = torch.tensor([state_ids], dtype=torch.long, device=model.device)
+    states = [
+        torch.tensor(state_ids, dtype=torch.long, device=model.device)
+        for state_ids in row.pre_forward_ids
+    ]
+    if any(state.shape != states[0].shape for state in states):
+        raise RuntimeError("native trajectory states are not equal length; cannot microbatch")
+
+    for start in range(0, len(states), batch_size):
+        chunk_state_ids = row.pre_forward_ids[start : start + batch_size]
+        batch_input_ids = torch.stack(states[start : start + batch_size], dim=0)
         _logits, _attentions, hidden_states = model.forward_attentions(
-            state, output_hidden_states=True
+            batch_input_ids, output_hidden_states=True
         )
-        for depth in depths:
-            layer = int(depth["actual_layer_index"])
-            hidden = hidden_states[min(layer + 1, len(hidden_states) - 1)]
-            transformed = model.get_final_norm()(hidden)
-            logits = model.get_lm_head()(transformed)[0].float()
-            for position in range(int(row.prefix_length), len(state_ids)):
-                if int(state_ids[position]) != mask_id:
-                    continue
-                try:
-                    source = prediction_source_index(position, int(model.prediction_offset))
-                except ValueError:
-                    continue
-                target = int(final_ids[position])
-                position_logits = logits[source]
-                target_value = position_logits[target]
-                rank = int((position_logits > target_value).sum().item()) + 1
-                evidence = {
-                    "sentence_id": row.prompt_id,
-                    "prompt_id": row.prompt_id,
-                    "task": row.task,
-                    "seed": int(row.seed),
-                    "timestep": timestep,
-                    "normalized_progress": timestep / 63,
-                    **depth,
-                    "target_position": position,
-                    "prediction_source_position": source,
-                    "prediction_offset": int(model.prediction_offset),
-                    "target_token_id": target,
-                    "top1": int(rank == 1),
-                    "top5": int(rank <= 5),
-                    "rank": rank,
-                    "mrr": 1.0 / rank,
-                    "target_logit": float(target_value),
-                    "position_was_masked": True,
-                    "target_is_eventual_generated_token": True,
-                }
-                result.append(evidence)
+        for offset, state_ids in enumerate(chunk_state_ids):
+            timestep = start + offset
+            for depth in depths:
+                layer = int(depth["actual_layer_index"])
+                hidden = hidden_states[min(layer + 1, len(hidden_states) - 1)][offset : offset + 1]
+                transformed = model.get_final_norm()(hidden)
+                logits = model.get_lm_head()(transformed)[0].float()
+                for position in range(int(row.prefix_length), len(state_ids)):
+                    if int(state_ids[position]) != mask_id:
+                        continue
+                    try:
+                        source = prediction_source_index(position, int(model.prediction_offset))
+                    except ValueError:
+                        continue
+                    target = int(final_ids[position])
+                    position_logits = logits[source]
+                    target_value = position_logits[target]
+                    rank = int((position_logits > target_value).sum().item()) + 1
+                    evidence = {
+                        "sentence_id": row.prompt_id,
+                        "prompt_id": row.prompt_id,
+                        "task": row.task,
+                        "seed": int(row.seed),
+                        "timestep": timestep,
+                        "normalized_progress": timestep / 63,
+                        **depth,
+                        "target_position": position,
+                        "prediction_source_position": source,
+                        "prediction_offset": int(model.prediction_offset),
+                        "target_token_id": target,
+                        "top1": int(rank == 1),
+                        "top5": int(rank <= 5),
+                        "rank": rank,
+                        "mrr": 1.0 / rank,
+                        "target_logit": float(target_value),
+                        "position_was_masked": True,
+                        "target_is_eventual_generated_token": True,
+                    }
+                    result.append(evidence)
                 if collect_probe_features:
                     features.append(
                         {
@@ -246,9 +267,10 @@ def run_final_token(model, tokenizer, cfg: RunConfig, run_dir: Path, **_unused: 
     pd.DataFrame(depths).to_csv(run_dir / "relative_depth_mapping.csv", index=False)
     evidence_frames, probe_frames = [], []
     collect_probe = bool(cfg.experiment.settings.get("trained_probe"))
+    batch_size = cfg.runtime.timestep_batch_size
     for row in trajectories.itertuples(index=False):
         evidence, features = final_token_rows(
-            model, row, depths, collect_probe_features=collect_probe
+            model, row, depths, collect_probe_features=collect_probe, batch_size=batch_size
         )
         evidence_frames.append(evidence)
         if collect_probe:
