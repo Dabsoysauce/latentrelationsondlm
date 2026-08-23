@@ -14,7 +14,7 @@ import torch
 from ..checkpoints import CheckpointIdentity, SentenceCheckpointStore
 from ..config import RELATION_NAMES, RunConfig
 from ..data import load_manifest_examples
-from ..diffusion import attentions_for_state, teacher_forced_trajectory, tokenize
+from ..diffusion import attention_batches_for_states, teacher_forced_trajectory, tokenize
 from ..paper_protocol import PaperLockSet, write_resolved_selection_locks
 from .shared import write_frames
 
@@ -117,54 +117,73 @@ def _frozen_cases(examples, locks: PaperLockSet) -> list[HeatmapCase]:
     return cases
 
 
-def trajectory_chunk(model, tokenizer, cases, *, seed: int, locks: PaperLockSet):
+def trajectory_chunk(model, tokenizer, cases, *, seed: int, locks: PaperLockSet, batch_size: int = 8):
+    """Score every retained timestep of every case, batching equal-length states.
+
+    Each case's trajectory has one fixed sequence length throughout, so its
+    retained states are forwarded together via `attention_batches_for_states`
+    instead of one model call per timestep. Batching changes only execution
+    shape: which timesteps are kept (deterministic endpoint deduplication),
+    which attention matrix is selected, the entropy and relation-mass
+    arithmetic, and the row order are all unchanged, since every batch item's
+    matrix is sliced out of the shared forward independently before any of
+    that runs.
+    """
     rows = []
     for case in cases:
         lock = locks.resolve(case.relation)
         states = teacher_forced_trajectory(
             model, tokenizer, case.example.text, steps=64, seed=seed, include_bos=True
         )
-        for timestep, state in enumerate(states):
-            if timestep in {0, 63} and seed != 42:
-                continue
-            attentions = attentions_for_state(model, state)
-            matrix = attentions[lock.layer][0, lock.head].detach().float().cpu()
-            probability = matrix / matrix.sum(dim=-1, keepdim=True).clamp_min(1e-12)
-            entropy = -(
-                probability * probability.clamp_min(1e-12).log()
-            ).sum(dim=-1)[1:].mean()
-            labels = [
-                f"{token} [{'V' if visible else 'M'}]"
-                for token, visible in zip(state.tokens, state.is_visible, strict=True)
-            ]
-            relation_mass = float(
-                matrix[case.instance.attender_span[-1], case.instance.receiver_span].sum()
-            )
-            rows.append(
-                {
-                    "sentence_id": case.sentence_id,
-                    "source_sentence_id": case.example.sentence_id,
-                    "sentence": case.example.text,
-                    "relation": case.relation,
-                    "direction": (
-                        "right"
-                        if case.instance.receiver_word_idx > case.instance.attender_word_idx
-                        else "left"
-                    ),
-                    "attender_span": case.instance.attender_span,
-                    "receiver_span": case.instance.receiver_span,
-                    "layer": lock.layer,
-                    "head": lock.head,
-                    "seed": seed,
-                    "timestep": timestep,
-                    "normalized_progress": timestep / 63,
-                    "token_labels": labels,
-                    "is_visible": state.is_visible,
-                    "entropy": float(entropy),
-                    "relation_attention_mass": relation_mass,
-                    "attention": matrix.tolist(),
-                }
-            )
+        timesteps = [
+            timestep
+            for timestep in range(len(states))
+            if not (timestep in {0, 63} and seed != 42)
+        ]
+        selected = [states[timestep] for timestep in timesteps]
+        for batch_start, batch_states, batch_attentions in attention_batches_for_states(
+            model, selected, batch_size=batch_size
+        ):
+            layer_attentions = batch_attentions[lock.layer]
+            for offset, state in enumerate(batch_states):
+                timestep = timesteps[batch_start + offset]
+                matrix = layer_attentions[offset, lock.head].detach().float().cpu()
+                probability = matrix / matrix.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+                entropy = -(
+                    probability * probability.clamp_min(1e-12).log()
+                ).sum(dim=-1)[1:].mean()
+                labels = [
+                    f"{token} [{'V' if visible else 'M'}]"
+                    for token, visible in zip(state.tokens, state.is_visible, strict=True)
+                ]
+                relation_mass = float(
+                    matrix[case.instance.attender_span[-1], case.instance.receiver_span].sum()
+                )
+                rows.append(
+                    {
+                        "sentence_id": case.sentence_id,
+                        "source_sentence_id": case.example.sentence_id,
+                        "sentence": case.example.text,
+                        "relation": case.relation,
+                        "direction": (
+                            "right"
+                            if case.instance.receiver_word_idx > case.instance.attender_word_idx
+                            else "left"
+                        ),
+                        "attender_span": case.instance.attender_span,
+                        "receiver_span": case.instance.receiver_span,
+                        "layer": lock.layer,
+                        "head": lock.head,
+                        "seed": seed,
+                        "timestep": timestep,
+                        "normalized_progress": timestep / 63,
+                        "token_labels": labels,
+                        "is_visible": state.is_visible,
+                        "entropy": float(entropy),
+                        "relation_attention_mass": relation_mass,
+                        "attention": matrix.tolist(),
+                    }
+                )
     return pd.DataFrame(rows)
 
 
@@ -266,7 +285,12 @@ def run(
                 cases,
                 identity,
                 lambda chunk, _start, current_seed=seed: trajectory_chunk(
-                    model, tokenizer, chunk, seed=current_seed, locks=source_locks
+                    model,
+                    tokenizer,
+                    chunk,
+                    seed=current_seed,
+                    locks=source_locks,
+                    batch_size=cfg.runtime.timestep_batch_size,
                 ),
             )
         )
