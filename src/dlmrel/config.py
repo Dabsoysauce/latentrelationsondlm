@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from dataclasses import MISSING, asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, TypeVar, get_args, get_origin, get_type_hints
 
@@ -356,6 +356,20 @@ def _nested_dataclass(field_type: Any) -> type | None:
     return None
 
 
+# RuntimeConfig holds execution knobs only: results root, run id, resume,
+# dry run, selection lock path, timestep batch size, attention-cache paths and
+# stage selection. None of them changes a recorded scientific value, so a run
+# directory written before one of them existed may adopt that field's declared
+# default when its stored config is re-read. Every scientific dataclass still
+# requires every field, and unknown fields are still rejected everywhere.
+#
+# Without this, adding any runtime knob retroactively invalidates every
+# completed run: `pos_stage` did exactly that, and `dlmrel validate` began
+# rejecting finished relation-selection, time-curve and entropy directories
+# with "missing required config.runtime field: pos_stage".
+_DEFAULTABLE_WHEN_ABSENT = frozenset({"RuntimeConfig"})
+
+
 def _strict_dataclass(cls: type[T], raw: dict[str, Any], where: str) -> T:
     if not isinstance(raw, dict):
         raise ConfigError(f"{where} must be a mapping")
@@ -364,6 +378,10 @@ def _strict_dataclass(cls: type[T], raw: dict[str, Any], where: str) -> T:
     values: dict[str, Any] = {}
     for item in fields(cls):
         if item.name not in raw:
+            if cls.__name__ in _DEFAULTABLE_WHEN_ABSENT and (
+                item.default is not MISSING or item.default_factory is not MISSING
+            ):
+                continue
             raise ConfigError(f"missing required {where} field: {item.name}")
         value = raw[item.name]
         nested = _nested_dataclass(hints.get(item.name, item.type))
