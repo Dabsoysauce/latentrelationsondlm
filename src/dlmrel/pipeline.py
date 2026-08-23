@@ -172,7 +172,13 @@ def run_real(cfg: RunConfig, run_dir: Path, manifest_hashes: dict[str, str]) -> 
     source_locks = (
         read_source_locks(cfg.runtime.selection_lock, cfg) if cfg.runtime.selection_lock else None
     )
-    model, tokenizer, model_metadata = load_adapter(cfg)
+    pos_fit_only = (
+        cfg.experiment.type == "pos_token_class_linear_probes" and cfg.runtime.pos_stage == "fit"
+    )
+    if pos_fit_only:
+        model, tokenizer, model_metadata = None, None, None
+    else:
+        model, tokenizer, model_metadata = load_adapter(cfg)
 
     if is_paper_experiment(cfg.experiment) and cfg.model.family == "fake":
         from .experiments.paper_fake import run
@@ -215,7 +221,14 @@ def run_real(cfg: RunConfig, run_dir: Path, manifest_hashes: dict[str, str]) -> 
     elif cfg.experiment.type == "pos_token_class_linear_probes":
         from .experiments.paper_pos import run
 
-        details = run(model, tokenizer, cfg, run_dir)
+        details = run(
+            model,
+            tokenizer,
+            cfg,
+            run_dir,
+            pos_stage=cfg.runtime.pos_stage,
+            manifest_hashes=manifest_hashes,
+        )
     elif cfg.experiment.type == "final_token_prediction_by_layer":
         from .experiments.paper_native import run_final_token
 
@@ -288,6 +301,22 @@ def run_real(cfg: RunConfig, run_dir: Path, manifest_hashes: dict[str, str]) -> 
         details = run(model, tokenizer, cfg, run_dir)
     else:  # RunConfig validation should make this unreachable.
         raise ArtifactError(f"no runner for experiment {cfg.experiment.type!r}")
+
+    pos_extract_only = (
+        cfg.experiment.type == "pos_token_class_linear_probes" and cfg.runtime.pos_stage == "extract"
+    )
+    if pos_extract_only:
+        # Deliberately do not write summary.json or mark completion_status
+        # complete: extraction is not the full result, and a later --pos-stage
+        # fit run must still be able to --resume this same run directory.
+        atomic_json(
+            run_dir / "pos_extract_status.json",
+            {"schema_version": "dlmrel-pos-extract-v1", **details},
+        )
+        metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+        metadata["last_resumed_at"] = datetime.now(timezone.utc).isoformat()
+        atomic_json(run_dir / "run_metadata.json", metadata)
+        return
 
     atomic_json(
         run_dir / "summary.json",

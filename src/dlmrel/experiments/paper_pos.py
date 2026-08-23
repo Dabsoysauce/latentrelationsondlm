@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -13,6 +14,7 @@ import numpy as np
 import pandas as pd
 import torch
 
+from ..artifacts import ArtifactError, atomic_json
 from ..checkpoints import CheckpointIdentity, SentenceCheckpointStore
 from ..config import RunConfig
 from ..data import load_manifest_examples
@@ -23,6 +25,8 @@ from ..stanford_pos import provision_stanford_pos, stanford_pos_identity
 from .shared import write_frames
 
 LABELS = ("NOUN", "VERB", "ADJ", "ADV", "PREP", "DET", "PRON", "CONJ")
+ROLE_STAGE = {"select": "paper-pos-selection-features", "test": "paper-pos-test-features"}
+FIT_CHECKPOINT_SCHEMA = "dlmrel-pos-fit-checkpoint-v1"
 
 
 def map_stanford_tag(tag: str) -> str | None:
@@ -235,6 +239,137 @@ def feature_rows(
     return pd.DataFrame(rows)
 
 
+class _FitCheckpointStore:
+    """Atomic, identity-checked cache of one fitted-and-evaluated logical probe.
+
+    The logical unit is (seed, progress, relative_label, feature_kind): the
+    main classifier plus its shuffled-label and random-feature controls,
+    fit and evaluated together since they share one training call. Restarting
+    one incomplete unit is acceptable; restarting thousands of completed ones
+    is not, so this never serializes partially trained optimizer state --
+    only the finished evidence frame and metrics.
+    """
+
+    def __init__(
+        self,
+        run_dir: Path,
+        *,
+        scientific_config_hash: str | None,
+        manifest_hashes: dict,
+        regularization: float,
+        label_inventory: list[str],
+    ):
+        self.directory = run_dir / "fit_checkpoints"
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.scientific_config_hash = scientific_config_hash
+        self.manifest_hashes = manifest_hashes
+        self.regularization = regularization
+        self.label_inventory = label_inventory
+
+    def _paths(self, seed: int, progress: float, relative_label: str, feature_kind: str):
+        slug = f"seed-{seed}__p-{progress:.6f}__{relative_label}__{feature_kind}"
+        path = self.directory / f"{slug}.parquet"
+        return path, path.with_suffix(".meta.json")
+
+    def _expected(self, seed: int, progress: float, relative_label: str, feature_kind: str) -> dict:
+        return {
+            "schema_version": FIT_CHECKPOINT_SCHEMA,
+            "scientific_config_hash": self.scientific_config_hash,
+            "manifest_hashes": self.manifest_hashes,
+            "seed": seed,
+            "normalized_progress": progress,
+            "relative_label": relative_label,
+            "feature_kind": feature_kind,
+            "fixed_regularization_c": self.regularization,
+            "label_inventory": self.label_inventory,
+        }
+
+    def load(self, seed: int, progress: float, relative_label: str, feature_kind: str):
+        path, meta_path = self._paths(seed, progress, relative_label, feature_kind)
+        if not path.exists() or not meta_path.exists():
+            return None
+        try:
+            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        expected = self._expected(seed, progress, relative_label, feature_kind)
+        if any(metadata.get(key) != value for key, value in expected.items()):
+            return None
+        try:
+            evidence = pd.read_parquet(path)
+        except (OSError, ValueError):
+            return None
+        if metadata.get("row_count") != len(evidence):
+            return None
+        return evidence, metadata["metrics"]
+
+    def store(
+        self,
+        seed: int,
+        progress: float,
+        relative_label: str,
+        feature_kind: str,
+        evidence: pd.DataFrame,
+        metrics: dict,
+    ) -> None:
+        path, meta_path = self._paths(seed, progress, relative_label, feature_kind)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.unlink(missing_ok=True)
+        evidence.to_parquet(temporary, index=False)
+        os.replace(temporary, path)
+        atomic_json(
+            meta_path,
+            {
+                **self._expected(seed, progress, relative_label, feature_kind),
+                "row_count": len(evidence),
+                "metrics": metrics,
+            },
+        )
+
+
+def _reuse_t0_from_seed42(
+    store: SentenceCheckpointStore, examples, *, stage: str, target_seed: int
+) -> pd.DataFrame:
+    """Materialize seed 43/44's t=0 feature checkpoints from seed 42's.
+
+    `state_at_time` draws no randomness at timestep 0 (its reveal loop is
+    `for progress in range(diffusion_time)`), so the t=0 state -- and every
+    feature computed from it -- is bitwise identical across seeds. Existing
+    seed 43/44 checkpoints are loaded normally; anything missing is derived
+    from the validated seed-42 chunk covering the same sentence range, with
+    only its `seed` column rewritten, through the store's normal atomic
+    chunk-write path, never a live model forward.
+    """
+    target_identity = CheckpointIdentity(
+        stage=stage, seed=target_seed, normalized_progress=0.0, timestep=0
+    )
+    source_identity = CheckpointIdentity(stage=stage, seed=42, normalized_progress=0.0, timestep=0)
+    sentence_ids = [str(example.sentence_id) for example in examples]
+    frames = []
+    for start in range(0, len(examples), store.chunk_size):
+        end = min(start + store.chunk_size, len(examples))
+        chunk_ids = sentence_ids[start:end]
+        target_path = store.directory / target_identity.filename(start, end)
+        target_expected = store._expected_metadata(examples, target_identity, start, end)
+        existing = store._load_chunk(target_path, target_expected, chunk_ids)
+        if existing is not None:
+            frames.append(existing)
+            continue
+        source_path = store.directory / source_identity.filename(start, end)
+        source_expected = store._expected_metadata(examples, source_identity, start, end)
+        source = store._load_chunk(source_path, source_expected, chunk_ids)
+        if source is None:
+            raise ArtifactError(
+                f"seed 42 t=0 checkpoint required to derive seed {target_seed} is missing: "
+                f"{source_path.name}"
+            )
+        derived = source.copy()
+        derived["seed"] = target_seed
+        store._write_chunk(target_path, derived, target_expected)
+        frames.append(derived)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
 def _fit(frame: pd.DataFrame, *, seed: int, regularization: float):
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
@@ -287,100 +422,157 @@ def _evaluate(fitted, train: pd.DataFrame, test: pd.DataFrame, *, seed: int):
     return evidence, metrics
 
 
-def run(model, tokenizer, cfg: RunConfig, run_dir: Path, **_unused: Any) -> dict[str, Any]:
+def _extract(model, tokenizer, cfg: RunConfig, run_dir: Path) -> None:
+    """Phase 1 (GPU): compute and checkpoint features for every role/seed/progress.
+
+    Exits without fitting or evaluating anything -- no sklearn classifier is
+    ever constructed here, so this can run to completion on a GPU worker that
+    then hands off to a CPU-only fit stage.
+    """
     settings = cfg.experiment.settings
     jar_path, tagger_model_path = _stanford_paths(settings)
     tagger_identity = stanford_pos_identity(jar_path, tagger_model_path)
+    atomic_json(run_dir / "tagger_identity.json", tagger_identity)
+
     selection, selection_exclusions = load_manifest_examples(cfg, tokenizer, "select")
-    selection_labels = stanford_labels(selection, settings)
     if not selection:
         raise ValueError("POS probes have no valid selection examples")
-    probe = state_at_time(model, tokenizer, selection[0].text, 0, 64, 42, True)
-    _logits, attentions, _hidden = model.forward_attentions(
-        probe.input_ids, output_hidden_states=True
-    )
-    depths = map_relative_depths(len(attentions), settings["relative_depths"])
-    pd.DataFrame(depths).to_csv(run_dir / "relative_depth_mapping.csv", index=False)
-    store = SentenceCheckpointStore(run_dir)
-    frozen = {}
-    selection_frames = {}
-    regularization = float(settings["fixed_regularization_c"])
-    for seed in cfg.experiment.seeds:
-        for progress in cfg.experiment.normalized_progress:
-            identity = CheckpointIdentity(
-                stage="paper-pos-selection-features",
-                seed=seed,
-                normalized_progress=progress,
-                timestep=round(progress * 63),
-            )
-            frame = store.run(
-                selection,
-                identity,
-                lambda chunk, _start, current_seed=seed, current_progress=progress: feature_rows(
-                    model,
-                    tokenizer,
-                    chunk,
-                    labels_by_sentence=selection_labels,
-                    seed=current_seed,
-                    progress=current_progress,
-                    depth_rows=depths,
-                    role="select",
-                ),
-            )
-            for identity_values, group in frame.groupby(
-                ["relative_label", "feature_kind"], observed=True
-            ):
-                key = (seed, progress, *identity_values)
-                selection_frames[key] = group
-                frozen[key] = _fit(group, seed=seed, regularization=regularization)
-
-    # No test manifest, labels, or features are opened before every probe is frozen.
+    selection_labels = stanford_labels(selection, settings)
     test, test_exclusions = load_manifest_examples(cfg, tokenizer, "test")
     test_labels = stanford_labels(test, settings)
-    evidence_frames, metric_rows = [], []
+
+    depth_mapping_path = run_dir / "relative_depth_mapping.csv"
+    if depth_mapping_path.is_file():
+        # A prior extract call already ran this probe forward; re-running
+        # extract to resume the remaining chunks must not repeat it.
+        depths = pd.read_csv(depth_mapping_path).to_dict("records")
+    else:
+        probe = state_at_time(model, tokenizer, selection[0].text, 0, 64, 42, True)
+        _logits, attentions, _hidden = model.forward_attentions(
+            probe.input_ids, output_hidden_states=True
+        )
+        depths = map_relative_depths(len(attentions), settings["relative_depths"])
+        pd.DataFrame(depths).to_csv(depth_mapping_path, index=False)
+
+    store = SentenceCheckpointStore(run_dir)
+    exclusions = pd.concat([selection_exclusions, test_exclusions], ignore_index=True)
+    exclusions.to_parquet(run_dir / "extract_exclusions.parquet", index=False)
+
+    roles = (("select", selection, selection_labels), ("test", test, test_labels))
+    for role, examples, labels in roles:
+        stage = ROLE_STAGE[role]
+        for seed in cfg.experiment.seeds:
+            for progress in cfg.experiment.normalized_progress:
+                if progress == 0.0 and seed != 42:
+                    _reuse_t0_from_seed42(store, examples, stage=stage, target_seed=seed)
+                    continue
+                identity = CheckpointIdentity(
+                    stage=stage,
+                    seed=seed,
+                    normalized_progress=progress,
+                    timestep=round(progress * 63),
+                )
+                store.run(
+                    examples,
+                    identity,
+                    lambda chunk, _start, current_seed=seed, current_progress=progress, current_labels=labels, current_role=role: feature_rows(  # noqa: E501
+                        model,
+                        tokenizer,
+                        chunk,
+                        labels_by_sentence=current_labels,
+                        seed=current_seed,
+                        progress=current_progress,
+                        depth_rows=depths,
+                        role=current_role,
+                    ),
+                )
+
+
+def _fit_and_evaluate(cfg: RunConfig, run_dir: Path, *, manifest_hashes: dict) -> dict[str, Any]:
+    """Phase 2 (CPU): fit and evaluate every probe from already-extracted features.
+
+    Loads only checkpointed feature parquet files -- no model, no tokenizer,
+    no GPU. Fails closed if a required feature checkpoint is missing.
+    """
+    settings = cfg.experiment.settings
+    depths = pd.read_csv(run_dir / "relative_depth_mapping.csv").to_dict("records")
+    tagger_identity = json.loads((run_dir / "tagger_identity.json").read_text(encoding="utf-8"))
+    scientific_config_hash = json.loads(
+        (run_dir / "run_metadata.json").read_text(encoding="utf-8")
+    ).get("scientific_config_hash")
+    regularization = float(settings["fixed_regularization_c"])
+    label_inventory = list(LABELS)
+    fit_store = _FitCheckpointStore(
+        run_dir,
+        scientific_config_hash=scientific_config_hash,
+        manifest_hashes=manifest_hashes,
+        regularization=regularization,
+        label_inventory=label_inventory,
+    )
+    checkpoint_store = SentenceCheckpointStore(run_dir)
+
+    # Selection frames are organized eagerly (cheap: no sklearn fit happens
+    # here), but the actual classifier fit is deferred into the test loop
+    # below and only run for a (seed, progress, relative_label, feature_kind)
+    # key whose Phase 2 checkpoint is missing. Fitting thousands of
+    # classifiers just to discover their evaluation was already checkpointed
+    # would defeat the point of resuming an interrupted fit stage.
+    frozen: dict = {}
+    selection_frames: dict = {}
+    selection_sentences: set[str] = set()
     for seed in cfg.experiment.seeds:
         for progress in cfg.experiment.normalized_progress:
-            identity = CheckpointIdentity(
-                stage="paper-pos-test-features",
-                seed=seed,
-                normalized_progress=progress,
-                timestep=round(progress * 63),
+            frame = checkpoint_store.require_stage(
+                ROLE_STAGE["select"], seed, progress, round(progress * 63)
             )
-            frame = store.run(
-                test,
-                identity,
-                lambda chunk, _start, current_seed=seed, current_progress=progress: feature_rows(
-                    model,
-                    tokenizer,
-                    chunk,
-                    labels_by_sentence=test_labels,
-                    seed=current_seed,
-                    progress=current_progress,
-                    depth_rows=depths,
-                    role="test",
-                ),
-            )
+            selection_sentences.update(frame["sentence_id"].astype(str))
             for identity_values, group in frame.groupby(
                 ["relative_label", "feature_kind"], observed=True
             ):
-                key = (seed, progress, *identity_values)
-                evidence, metrics = _evaluate(
-                    frozen[key], selection_frames[key], group, seed=seed
-                )
+                selection_frames[(seed, progress, *identity_values)] = group
+
+    evidence_frames, metric_rows = [], []
+    test_sentences: set[str] = set()
+    for seed in cfg.experiment.seeds:
+        for progress in cfg.experiment.normalized_progress:
+            frame = checkpoint_store.require_stage(
+                ROLE_STAGE["test"], seed, progress, round(progress * 63)
+            )
+            test_sentences.update(frame["sentence_id"].astype(str))
+            for identity_values, group in frame.groupby(
+                ["relative_label", "feature_kind"], observed=True
+            ):
+                relative_label, feature_kind = identity_values
+                key = (seed, progress, relative_label, feature_kind)
+                cached = fit_store.load(seed, progress, relative_label, feature_kind)
+                if cached is not None:
+                    evidence, metrics = cached
+                else:
+                    if key not in frozen:
+                        frozen[key] = _fit(
+                            selection_frames[key], seed=seed, regularization=regularization
+                        )
+                    evidence, metrics = _evaluate(
+                        frozen[key], selection_frames[key], group, seed=seed
+                    )
+                    fit_store.store(seed, progress, relative_label, feature_kind, evidence, metrics)
                 evidence_frames.append(evidence)
                 metric_rows.append(
                     {
                         "seed": seed,
                         "normalized_progress": progress,
                         "mask_ratio": 1.0 - progress,
-                        "relative_label": identity_values[0],
-                        "feature_kind": identity_values[1],
+                        "relative_label": relative_label,
+                        "feature_kind": feature_kind,
                         **metrics,
                     }
                 )
     raw = pd.concat(evidence_frames, ignore_index=True)
     per_seed = pd.DataFrame(metric_rows)
-    exclusions = pd.concat([selection_exclusions, test_exclusions], ignore_index=True)
+    exclusions_path = run_dir / "extract_exclusions.parquet"
+    exclusions = (
+        pd.read_parquet(exclusions_path) if exclusions_path.exists() else pd.DataFrame()
+    )
     write_frames(run_dir, raw=raw, exclusions=exclusions)
     per_seed.to_csv(run_dir / "per_seed_metrics.csv", index=False)
     group_keys = ["normalized_progress", "mask_ratio", "relative_label", "feature_kind"]
@@ -411,11 +603,40 @@ def run(model, tokenizer, cfg: RunConfig, run_dir: Path, **_unused: Any) -> dict
         "tagger_auto_provision_supported": True,
         "historical_release_recovered": False,
         "ud_upos_substituted": False,
-        "label_inventory": list(LABELS),
+        "label_inventory": label_inventory,
         "relative_depths": depths,
         "mask_ratios": settings["mask_ratios"],
         "fixed_regularization_c": regularization,
         "head_level_probes": True,
-        "selection_sentences": len(selection),
-        "test_sentences": len(test),
+        "selection_sentences": len(selection_sentences),
+        "test_sentences": len(test_sentences),
     }
+
+
+def run(
+    model,
+    tokenizer,
+    cfg: RunConfig,
+    run_dir: Path,
+    *,
+    pos_stage: str = "all",
+    manifest_hashes: dict | None = None,
+    **_unused: Any,
+) -> dict[str, Any]:
+    """Dispatch to the requested POS stage.
+
+    'extract' (GPU) computes and checkpoints features, then returns without
+    fitting anything. 'fit' (CPU, no model) loads only those checkpoints and
+    fits/evaluates every probe. 'all' runs both in sequence and is exactly
+    equivalent to 'fit' immediately following 'extract' -- it is implemented
+    as that same sequence, not a separate code path, so the two can never
+    silently diverge.
+    """
+    manifest_hashes = manifest_hashes or {}
+    if pos_stage == "extract":
+        _extract(model, tokenizer, cfg, run_dir)
+        return {"pos_stage": "extract", "extract_complete": True}
+    if pos_stage == "fit":
+        return {"pos_stage": "fit", **_fit_and_evaluate(cfg, run_dir, manifest_hashes=manifest_hashes)}
+    _extract(model, tokenizer, cfg, run_dir)
+    return {"pos_stage": "all", **_fit_and_evaluate(cfg, run_dir, manifest_hashes=manifest_hashes)}

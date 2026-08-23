@@ -66,6 +66,7 @@ def resolve_run(args) -> RunConfig:
         timestep_batch_size=args.timestep_batch_size,
         export_attention_cache=args.export_attention_cache,
         attention_cache=args.attention_cache,
+        pos_stage=args.pos_stage,
     )
     return RunConfig.load_files(args.model, args.dataset, args.experiment, runtime=runtime)
 
@@ -162,6 +163,10 @@ def cmd_run(args) -> None:
         run_fake(cfg, target)
     else:
         run_real(cfg, target, audit["manifest_hashes"])
+    if cfg.runtime.pos_stage == "extract":
+        status = json.loads((target / "pos_extract_status.json").read_text(encoding="utf-8"))
+        print(json.dumps({"run_dir": str(target), "pos_extract_status": status}, indent=2))
+        return
     validation = validate_run(target)
     if not validation["valid"]:
         raise ArtifactError("run failed validation: " + "; ".join(validation["errors"]))
@@ -393,6 +398,17 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--attention-cache",
         help="completed English time-trajectory run whose entropy cache should be reused",
+    )
+    run.add_argument(
+        "--pos-stage",
+        choices=["extract", "fit", "all"],
+        default="all",
+        help=(
+            "pos_token_class_linear_probes only: 'extract' computes and checkpoints "
+            "features on GPU then exits without fitting classifiers; 'fit' loads only "
+            "existing feature checkpoints and fits/evaluates on CPU without loading a "
+            "model; 'all' is the original end-to-end behavior"
+        ),
     )
     run.add_argument("--dry-run", action="store_true")
     run.set_defaults(func=cmd_run)

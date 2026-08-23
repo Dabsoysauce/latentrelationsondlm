@@ -153,6 +153,65 @@ class SentenceCheckpointStore:
                 self._write_chunk(second_path, second, second_expected)
             yield first, second
 
+    def require_stage(
+        self, stage: str, seed: int, normalized_progress: float, timestep: int
+    ) -> pd.DataFrame:
+        """Load every already-computed chunk for one (stage, seed, progress) triple.
+
+        Discovers chunks by directory listing rather than requiring the caller
+        to reconstruct the exact example list, so this never needs a model or
+        tokenizer loaded. Raises if no chunk exists, if any chunk fails the
+        same validation `run` applies (schema, scientific identity, hash), or
+        if the recovered chunks do not tile sentences [0, N) contiguously from
+        zero -- extraction must have stopped partway through a chunk.
+        """
+        identity = CheckpointIdentity(
+            stage=stage, seed=seed, normalized_progress=normalized_progress, timestep=timestep
+        )
+        stage_slug = re.sub(r"[^A-Za-z0-9_-]+", "-", identity.stage).strip("-")
+        prefix = (
+            f"{stage_slug}__seed-{seed}__p-{normalized_progress:.6f}__"
+            f"t-{timestep}__heads-all__sentences-"
+        )
+        matches = sorted(self.directory.glob(f"{prefix}*.parquet"))
+        if not matches:
+            raise ArtifactError(
+                f"no extracted checkpoints for stage={stage!r} seed={seed} "
+                f"progress={normalized_progress}; run --pos-stage extract first"
+            )
+        frames = []
+        expected_start = 0
+        for path in matches:
+            metadata_path = _metadata_path(path)
+            if not metadata_path.exists():
+                raise ArtifactError(f"checkpoint chunk missing metadata: {path.name}")
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ArtifactError(f"checkpoint chunk metadata is unreadable: {path.name}") from exc
+            required = {
+                "schema_version": CHECKPOINT_SCHEMA,
+                "stage": identity.stage,
+                "seed": seed,
+                "normalized_progress": normalized_progress,
+                "timestep": timestep,
+                "scientific_config_hash": self.scientific_config_hash,
+                "manifest_hashes": self.manifests,
+            }
+            if any(metadata.get(key) != value for key, value in required.items()):
+                raise ArtifactError(f"checkpoint chunk identity mismatch: {path.name}")
+            if metadata.get("parquet_sha256") != _file_sha256(path):
+                raise ArtifactError(f"checkpoint chunk does not match its recorded hash: {path.name}")
+            start, end = metadata.get("sentence_start"), metadata.get("sentence_end")
+            if start != expected_start or not isinstance(end, int) or end <= start:
+                raise ArtifactError(f"checkpoint chunks are not contiguous from zero: {path.name}")
+            frame = pd.read_parquet(path)
+            if len(frame) != metadata.get("row_count"):
+                raise ArtifactError(f"checkpoint chunk row count differs from its metadata: {path.name}")
+            frames.append(frame)
+            expected_start = end
+        return pd.concat(frames, ignore_index=True)
+
     def _expected_metadata(
         self,
         examples: Sequence[T],
