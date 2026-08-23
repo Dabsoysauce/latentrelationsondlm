@@ -34,10 +34,15 @@ def _frozen_probe_path(run_dir: Path, key: tuple[Any, ...]) -> Path:
 
 
 def _write_frozen_probe(path: Path, key: tuple[Any, ...], fitted: Any) -> None:
+    scaler, classifier = fitted[:2]
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("wb") as handle:
-        pickle.dump({"key": key, "fitted": fitted}, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump(
+            {"key": key, "format": "compact-v1", "fitted": (scaler, classifier)},
+            handle,
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
@@ -48,7 +53,10 @@ def _load_frozen_probe(path: Path, key: tuple[Any, ...]) -> Any:
         payload = pickle.load(handle)
     if payload.get("key") != key:
         raise RuntimeError(f"frozen POS probe identity mismatch: {path}")
-    return payload["fitted"]
+    fitted = payload["fitted"]
+    if payload.get("format") != "compact-v1" or len(fitted) != 2:
+        _write_frozen_probe(path, key, fitted)
+    return fitted[:2]
 
 
 def map_stanford_tag(tag: str) -> str | None:
@@ -327,6 +335,32 @@ def run(model, tokenizer, cfg: RunConfig, run_dir: Path, **_unused: Any) -> dict
     evidence_frames, metric_rows = [], []
     for seed in cfg.experiment.seeds:
         for progress in cfg.experiment.normalized_progress:
+            selection_identity = CheckpointIdentity(
+                stage="paper-pos-selection-features",
+                seed=seed,
+                normalized_progress=progress,
+                timestep=round(progress * 63),
+            )
+            selection_frame = store.run(
+                selection,
+                selection_identity,
+                lambda chunk, _start, current_seed=seed, current_progress=progress: feature_rows(
+                    model,
+                    tokenizer,
+                    chunk,
+                    labels_by_sentence=selection_labels,
+                    seed=current_seed,
+                    progress=current_progress,
+                    depth_rows=depths,
+                    role="select",
+                ),
+            )
+            selection_groups = {
+                identity_values: group
+                for identity_values, group in selection_frame.groupby(
+                    ["relative_label", "feature_kind"], observed=True
+                )
+            }
             identity = CheckpointIdentity(
                 stage="paper-pos-test-features",
                 seed=seed,
@@ -351,9 +385,13 @@ def run(model, tokenizer, cfg: RunConfig, run_dir: Path, **_unused: Any) -> dict
                 ["relative_label", "feature_kind"], observed=True
             ):
                 key = (seed, progress, *identity_values)
-                fitted = _load_frozen_probe(frozen[key], key)
+                scaler, classifier = _load_frozen_probe(frozen[key], key)
+                train = selection_groups[identity_values]
+                train_x = np.stack(train["feature"].map(np.asarray))
+                train_y = train["label"].to_numpy()
+                fitted = scaler, classifier, train_x, train_y
                 evidence, metrics = _evaluate(fitted, None, group, seed=seed)
-                del fitted
+                del fitted, train_x, train_y
                 evidence_frames.append(evidence)
                 metric_rows.append(
                     {
@@ -367,6 +405,7 @@ def run(model, tokenizer, cfg: RunConfig, run_dir: Path, **_unused: Any) -> dict
                 )
                 collect()
             del frame
+            del selection_frame, selection_groups
             collect()
     raw = pd.concat(evidence_frames, ignore_index=True)
     per_seed = pd.DataFrame(metric_rows)
