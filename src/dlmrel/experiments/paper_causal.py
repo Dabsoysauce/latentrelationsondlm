@@ -249,21 +249,41 @@ def ablation_chunk(model, tokenizer, examples, *, seed, timestep, locks, control
         baseline_logits, _attentions = model.forward_attentions(state.input_ids)
         if baseline_logits is None:
             raise RuntimeError("causal ablation requires final logits")
+        requested = []
         for instance in example.relations:
             selected = locks.resolve(instance.relation)
-            interventions = [
-                ("selected_relation_head", selected.layer, selected.head),
-                ("matched_low_relation_head", *controls[instance.relation]),
-                *pos_pairs,
-            ]
-            query = instance.attender_span[-1]
-            for control_kind, layer, head in interventions:
+            requested.append(
+                [
+                    ("selected_relation_head", selected.layer, selected.head),
+                    ("matched_low_relation_head", *controls[instance.relation]),
+                    *pos_pairs,
+                ]
+            )
+
+        # One ablated forward per distinct (layer, head) for this sentence and
+        # state. The ablated logits depend only on the input ids and the zeroed
+        # head slice, never on which relation instance asked for them, so the
+        # previous per-instance loop repeated identical full-model forwards --
+        # every POS-ranked pair was recomputed once per instance. Distinct
+        # control_kind labels that resolve to the same head still emit their own
+        # rows below; only the forward is shared.
+        ablated_cache: dict[tuple[int, int], tuple[torch.Tensor, Any]] = {}
+        for interventions in requested:
+            for _control_kind, layer, head in interventions:
+                if (layer, head) in ablated_cache:
+                    continue
                 with capture_or_ablate_projection(
                     model, layer, ablate_head=head
                 ) as (captured, metadata):
                     ablated_logits, _ablated_attentions = model.forward_attentions(state.input_ids)
                 if len(captured) != 1 or ablated_logits is None:
                     raise RuntimeError("single-head intervention did not execute exactly once")
+                ablated_cache[(layer, head)] = (ablated_logits, metadata)
+
+        for instance, interventions in zip(example.relations, requested, strict=True):
+            query = instance.attender_span[-1]
+            for control_kind, layer, head in interventions:
+                ablated_logits, metadata = ablated_cache[(layer, head)]
                 for target_position, target in _target_rows(
                     example, instance, state, tokenizer
                 ):
