@@ -13,9 +13,9 @@ import pandas as pd
 import torch
 
 from ..artifacts import ArtifactError, canonical_hash
-from ..checkpoints import CheckpointIdentity, SentenceCheckpointStore
 from ..config import RunConfig
 from ..models.base import NativeTrajectory
+from ..native_cache import NativeCacheIdentity, NativeTrajectoryCache
 from ..paper_protocol import map_relative_depths, prediction_source_index, timing_record
 from .shared import write_frames
 
@@ -80,29 +80,45 @@ def generate_trajectory_chunk(model, examples, *, seed: int, settings: dict[str,
     return pd.DataFrame(rows)
 
 
+def native_cache_identity(model, cfg: RunConfig, prompt_hash: str) -> NativeCacheIdentity:
+    settings = cfg.experiment.settings
+    return NativeCacheIdentity(
+        model_id=cfg.model.id,
+        model_revision=cfg.model.revision,
+        tokenizer_revision=cfg.model.tokenizer_revision,
+        remote_code_revision=cfg.model.remote_code_revision,
+        prompt_manifest_hash=prompt_hash,
+        steps=64,
+        generation_length=int(settings["generation_length"]),
+        temperature=float(settings["temperature"]),
+        top_p=float(settings["top_p"]),
+        reveal_policy=str(settings["reveal_policy"]),
+        prediction_offset=int(model.prediction_offset),
+    )
+
+
 def generate_trajectories(model, cfg: RunConfig, run_dir: Path):
+    """Generate, or reuse from the shared cache, this run's native trajectories.
+
+    `final_token_prediction_by_layer` and `prediction_before_unmasking_timing_analysis`
+    share identical generation settings, so whichever experiment runs first
+    populates the cache and the second reuses it with zero model forwards. The
+    cache lives outside any single experiment's run directory, at
+    `<results_root>/native_trajectory_cache/<identity hash>`, so it is found the
+    same way regardless of which experiment or run-id asks for it.
+    """
     settings = cfg.experiment.settings
     prompts, prompt_hash = load_prompt_manifest(settings["prompt_manifest"])
-    store = SentenceCheckpointStore(run_dir)
-    frames = []
-    for seed in cfg.experiment.seeds:
-        identity = CheckpointIdentity(
-            stage=f"{cfg.experiment.id}-native-trajectories-{prompt_hash[:12]}",
-            seed=seed,
-            normalized_progress=-1.0,
-            timestep=-1,
-        )
-        frames.append(
-            store.run(
-                prompts,
-                identity,
-                lambda chunk, _start, current_seed=seed: generate_trajectory_chunk(
-                    model, chunk, seed=current_seed, settings=settings
-                ),
-            )
-        )
-    trajectories = pd.concat(frames, ignore_index=True)
-    trajectories.sort_values(["task", "prompt_id", "seed"], inplace=True, kind="mergesort")
+    identity = native_cache_identity(model, cfg, prompt_hash)
+    cache_root = Path(cfg.runtime.results_root) / "native_trajectory_cache"
+    cache = NativeTrajectoryCache(cache_root, identity)
+
+    def generate_one(example: PromptExample, seed: int) -> pd.DataFrame:
+        return generate_trajectory_chunk(model, [example], seed=seed, settings=settings)
+
+    trajectories = cache.get_or_generate(prompts, list(cfg.experiment.seeds), generate_one)
+    trajectories = trajectories.sort_values(["task", "prompt_id", "seed"], kind="mergesort")
+    trajectories = trajectories.reset_index(drop=True)
     trajectories.to_parquet(run_dir / "native_trajectories.parquet", index=False)
     return trajectories, prompts, prompt_hash
 
