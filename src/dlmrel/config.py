@@ -228,6 +228,7 @@ class RuntimeConfig:
     timestep_batch_size: int = 8
     export_attention_cache: bool = False
     attention_cache: str | None = None
+    pos_stage: str = "all"
 
 
 @dataclass(frozen=True)
@@ -255,6 +256,10 @@ class RunConfig:
             raise ConfigError("attention-cache export is valid only for the relation time experiment")
         if self.runtime.attention_cache and self.experiment.id != "attention_entropy":
             raise ConfigError("attention-cache reuse is valid only for Attention Entropy")
+        if self.runtime.pos_stage not in {"extract", "fit", "all"}:
+            raise ConfigError("pos_stage must be extract, fit, or all")
+        if self.runtime.pos_stage != "all" and self.experiment.type != "pos_token_class_linear_probes":
+            raise ConfigError("pos_stage is only meaningful for pos_token_class_linear_probes")
         if self.track == "confirmatory_ewt" and self.dataset.id != "ewt":
             raise ConfigError("confirmatory_ewt track requires the EWT dataset")
         if self.track == "external_treebank_transfer" and self.dataset.id == "ewt":
