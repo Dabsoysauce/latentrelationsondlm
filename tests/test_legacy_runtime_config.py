@@ -21,6 +21,10 @@ EXECUTION_ONLY_RUNTIME_FIELDS = {
     "export_attention_cache",
     "attention_cache",
     "pos_stage",
+    "pos_fit_shard_count",
+    "pos_fit_shard_index",
+    "pos_fit_aggregate_only",
+    "pos_fit_checkpoint_mirror",
 }
 
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TypeVar
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from .artifacts import ArtifactError, atomic_json, canonical_hash
 
@@ -154,7 +155,14 @@ class SentenceCheckpointStore:
             yield first, second
 
     def require_stage(
-        self, stage: str, seed: int, normalized_progress: float, timestep: int
+        self,
+        stage: str,
+        seed: int,
+        normalized_progress: float,
+        timestep: int,
+        *,
+        columns: Sequence[str] | None = None,
+        filters=None,
     ) -> pd.DataFrame:
         """Load every already-computed chunk for one (stage, seed, progress) triple.
 
@@ -205,8 +213,15 @@ class SentenceCheckpointStore:
             start, end = metadata.get("sentence_start"), metadata.get("sentence_end")
             if start != expected_start or not isinstance(end, int) or end <= start:
                 raise ArtifactError(f"checkpoint chunks are not contiguous from zero: {path.name}")
-            frame = pd.read_parquet(path)
-            if len(frame) != metadata.get("row_count"):
+            if pq.read_metadata(path).num_rows != metadata.get("row_count"):
+                raise ArtifactError(f"checkpoint chunk row count differs from its metadata: {path.name}")
+            read_options = {}
+            if columns is not None:
+                read_options["columns"] = list(columns)
+            if filters is not None:
+                read_options["filters"] = filters
+            frame = pd.read_parquet(path, **read_options)
+            if filters is None and len(frame) != metadata.get("row_count"):
                 raise ArtifactError(f"checkpoint chunk row count differs from its metadata: {path.name}")
             frames.append(frame)
             expected_start = end

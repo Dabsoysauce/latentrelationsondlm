@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import math
 import shlex
 import sys
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +45,19 @@ from .pipeline import load_adapter, model_smoke_report, run_real
 from .relation_selection import derive_relation_selection_bundle
 
 
+@contextmanager
+def _pos_fit_initialization_lock(target: Path):
+    """Serialize shared run metadata setup before parallel POS workers diverge."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.parent / f".{target.name}.pos-fit-init.lock"
+    with lock_path.open("a+", encoding="utf-8") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
+
+
 def read_yaml(path: str | Path) -> dict:
     value = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     if not isinstance(value, dict):
@@ -67,6 +82,10 @@ def resolve_run(args) -> RunConfig:
         export_attention_cache=args.export_attention_cache,
         attention_cache=args.attention_cache,
         pos_stage=args.pos_stage,
+        pos_fit_shard_count=args.pos_fit_shard_count,
+        pos_fit_shard_index=args.pos_fit_shard_index,
+        pos_fit_aggregate_only=args.pos_fit_aggregate_only,
+        pos_fit_checkpoint_mirror=args.pos_fit_checkpoint_mirror,
     )
     return RunConfig.load_files(args.model, args.dataset, args.experiment, runtime=runtime)
 
@@ -158,7 +177,32 @@ def cmd_run(args) -> None:
     else:
         audit = load_audit(cfg.dataset)
     command = " ".join(shlex.quote(piece) for piece in ["dlmrel", *sys.argv[1:]])
-    initialize_run(target, cfg.to_dict(), command, audit["manifest_hashes"], resume=cfg.runtime.resume)
+    parallel_pos_fit = (
+        cfg.experiment.type == "pos_token_class_linear_probes"
+        and cfg.runtime.pos_stage == "fit"
+        and (
+            cfg.runtime.pos_fit_shard_count > 1
+            or cfg.runtime.pos_fit_aggregate_only
+            or cfg.runtime.pos_fit_checkpoint_mirror is not None
+        )
+    )
+    if parallel_pos_fit:
+        with _pos_fit_initialization_lock(target):
+            initialize_run(
+                target,
+                cfg.to_dict(),
+                command,
+                audit["manifest_hashes"],
+                resume=cfg.runtime.resume,
+            )
+    else:
+        initialize_run(
+            target,
+            cfg.to_dict(),
+            command,
+            audit["manifest_hashes"],
+            resume=cfg.runtime.resume,
+        )
     if cfg.model.family == "fake" and not is_paper_experiment(cfg.experiment):
         run_fake(cfg, target)
     else:
@@ -166,6 +210,14 @@ def cmd_run(args) -> None:
     if cfg.runtime.pos_stage == "extract":
         status = json.loads((target / "pos_extract_status.json").read_text(encoding="utf-8"))
         print(json.dumps({"run_dir": str(target), "pos_extract_status": status}, indent=2))
+        return
+    if cfg.runtime.pos_fit_shard_count > 1 and not cfg.runtime.pos_fit_aggregate_only:
+        status_path = target / (
+            f"pos_fit_shard_status-{cfg.runtime.pos_fit_shard_index:03d}-of-"
+            f"{cfg.runtime.pos_fit_shard_count:03d}.json"
+        )
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        print(json.dumps({"run_dir": str(target), "pos_fit_shard_status": status}, indent=2))
         return
     validation = validate_run(target)
     if not validation["valid"]:
@@ -409,6 +461,27 @@ def build_parser() -> argparse.ArgumentParser:
             "existing feature checkpoints and fits/evaluates on CPU without loading a "
             "model; 'all' is the original end-to-end behavior"
         ),
+    )
+    run.add_argument(
+        "--pos-fit-shard-count",
+        type=int,
+        default=1,
+        help="POS fit only: deterministic number of independent CPU shards",
+    )
+    run.add_argument(
+        "--pos-fit-shard-index",
+        type=int,
+        default=0,
+        help="POS fit only: zero-based deterministic CPU shard to execute",
+    )
+    run.add_argument(
+        "--pos-fit-aggregate-only",
+        action="store_true",
+        help="POS fit only: verify every logical-probe checkpoint and finalize artifacts",
+    )
+    run.add_argument(
+        "--pos-fit-checkpoint-mirror",
+        help="POS fit only: atomically mirror small completed fit checkpoints here",
     )
     run.add_argument("--dry-run", action="store_true")
     run.set_defaults(func=cmd_run)
