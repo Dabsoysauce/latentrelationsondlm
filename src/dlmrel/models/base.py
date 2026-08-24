@@ -63,6 +63,22 @@ class ModelAdapter(ABC):
         _logits, attentions = self.forward_attentions(input_ids)
         return attentions
 
+    def forward_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Return final logits without requiring attention or hidden-state output."""
+        logits, _attentions = self.forward_attentions(input_ids)
+        if logits is None:
+            raise RuntimeError("adapter returned no logits")
+        return logits
+
+    def forward_hidden_states(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        """Return hidden states without requiring logits or attention output."""
+        _attentions, hidden_states = self.forward_features(input_ids)
+        return hidden_states
+
+    def forward_capture_only(self, input_ids: torch.Tensor) -> None:
+        """Execute the transformer only so registered projection hooks can capture inputs."""
+        self.forward_attentions_only(input_ids)
+
     def forward_features(self, input_ids: torch.Tensor):
         """Return attentions and hidden states without requiring logits."""
         _logits, attentions, hidden_states = self.forward_attentions(
@@ -84,3 +100,11 @@ class ModelAdapter(ABC):
         from .native import random_reveal_trajectory
 
         return random_reveal_trajectory(self, self.tokenizer, prompt, **settings)
+
+    def native_trajectories(
+        self, prompts: list[str], **settings: Any
+    ) -> tuple[NativeTrajectory, ...]:
+        """Generate independent trajectories in one model-forward batch."""
+        from .native import random_reveal_trajectories
+
+        return random_reveal_trajectories(self, self.tokenizer, prompts, **settings)

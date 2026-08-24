@@ -91,3 +91,46 @@ def capture_projection_inputs(adapter, layers: list[int]):
                 module_path=path,
             )
         yield captures, metadata
+
+
+@contextmanager
+def ablate_projection_batch(
+    adapter, interventions: list[tuple[int, int] | None]
+):
+    """Apply one independent single-head ablation to each requested batch row.
+
+    ``None`` rows are untouched baselines. Each layer hook clones its projection
+    input once and zeros only the head slice assigned to each row, which is
+    algebraically identical to separate singleton intervention forwards.
+    """
+    requested_layers = sorted({item[0] for item in interventions if item is not None})
+    metadata: dict[int, ProjectionCapture] = {}
+    captures: dict[int, list[torch.Tensor]] = {layer: [] for layer in requested_layers}
+    with ExitStack() as stack:
+        for layer in requested_layers:
+            projection, number_of_heads, path = projection_module(adapter, layer)
+
+            def hook(_module, args, current_layer=layer, heads=number_of_heads):
+                values = args[0]
+                if values.shape[0] != len(interventions):
+                    raise RuntimeError("intervention count does not match model batch size")
+                captures[current_layer].append(values.detach().clone())
+                changed = values.clone()
+                for batch_index, intervention in enumerate(interventions):
+                    if intervention is None or intervention[0] != current_layer:
+                        continue
+                    changed[batch_index : batch_index + 1] = zero_projection_head_input(
+                        values[batch_index : batch_index + 1],
+                        head=intervention[1],
+                        number_of_heads=heads,
+                    )
+                return (changed, *args[1:])
+
+            stack.callback(projection.register_forward_pre_hook(hook).remove)
+            metadata[layer] = ProjectionCapture(
+                values=torch.empty(0),
+                weight=projection.weight,
+                number_of_heads=number_of_heads,
+                module_path=path,
+            )
+        yield captures, metadata

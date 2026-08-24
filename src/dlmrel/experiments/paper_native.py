@@ -13,6 +13,7 @@ import pandas as pd
 import torch
 
 from ..artifacts import ArtifactError, canonical_hash
+from ..batching import adaptive_forward_batches
 from ..config import RunConfig
 from ..models.base import NativeTrajectory
 from ..native_cache import NativeCacheIdentity, NativeTrajectoryCache
@@ -66,16 +67,25 @@ def _trajectory_row(example: PromptExample, seed: int, trajectory: NativeTraject
 
 
 def generate_trajectory_chunk(model, examples, *, seed: int, settings: dict[str, Any]) -> pd.DataFrame:
-    rows = []
-    for example in examples:
-        trajectory = model.native_trajectory(
-            example.prompt,
-            seed=seed,
-            steps=64,
-            generation_length=int(settings["generation_length"]),
-            temperature=float(settings["temperature"]),
-            top_p=float(settings["top_p"]),
+    arguments = {
+        "seed": seed,
+        "steps": 64,
+        "generation_length": int(settings["generation_length"]),
+        "temperature": float(settings["temperature"]),
+        "top_p": float(settings["top_p"]),
+    }
+    if hasattr(model, "native_trajectories"):
+        trajectories = model.native_trajectories(
+            [example.prompt for example in examples], **arguments
         )
+    else:
+        trajectories = tuple(
+            model.native_trajectory(example.prompt, **arguments) for example in examples
+        )
+    if len(trajectories) != len(examples):
+        raise RuntimeError("native adapter returned an incorrect trajectory batch size")
+    rows = []
+    for example, trajectory in zip(examples, trajectories, strict=True):
         rows.append(_trajectory_row(example, seed, trajectory))
     return pd.DataFrame(rows)
 
@@ -113,10 +123,15 @@ def generate_trajectories(model, cfg: RunConfig, run_dir: Path):
     cache_root = Path(cfg.runtime.results_root) / "native_trajectory_cache"
     cache = NativeTrajectoryCache(cache_root, identity)
 
-    def generate_one(example: PromptExample, seed: int) -> pd.DataFrame:
-        return generate_trajectory_chunk(model, [example], seed=seed, settings=settings)
+    def generate_many(examples: list[PromptExample], seed: int) -> pd.DataFrame:
+        return generate_trajectory_chunk(model, examples, seed=seed, settings=settings)
 
-    trajectories = cache.get_or_generate(prompts, list(cfg.experiment.seeds), generate_one)
+    trajectories = cache.get_or_generate_batched(
+        prompts,
+        list(cfg.experiment.seeds),
+        generate_many,
+        batch_size=cfg.runtime.native_batch_size,
+    )
     trajectories = trajectories.sort_values(["task", "prompt_id", "seed"], kind="mergesort")
     trajectories = trajectories.reset_index(drop=True)
     trajectories.to_parquet(run_dir / "native_trajectories.parquet", index=False)
@@ -124,11 +139,26 @@ def generate_trajectories(model, cfg: RunConfig, run_dir: Path):
 
 
 def _native_depth_mapping(model, input_ids: torch.Tensor, settings):
-    _logits, attentions, _hidden = model.forward_attentions(input_ids, output_hidden_states=True)
-    return map_relative_depths(len(attentions), settings["relative_depths"])
+    if hasattr(model, "forward_hidden_states"):
+        hidden = model.forward_hidden_states(input_ids)
+        number_of_layers = len(hidden) - 1
+    else:
+        _logits, attentions, _hidden = model.forward_attentions(
+            input_ids, output_hidden_states=True
+        )
+        number_of_layers = len(attentions)
+    return map_relative_depths(number_of_layers, settings["relative_depths"])
 
 
-def final_token_rows(model, row, depths, *, collect_probe_features: bool, batch_size: int = 8):
+def final_token_rows(
+    model,
+    row,
+    depths,
+    *,
+    collect_probe_features: bool,
+    batch_size: int = 8,
+    maximum_batch_size: int | None = None,
+):
     """Score every timestep's pre-forward state, batching equal-length states.
 
     A native trajectory's 64 pre-forward states share one fixed sequence
@@ -150,12 +180,25 @@ def final_token_rows(model, row, depths, *, collect_probe_features: bool, batch_
     if any(state.shape != states[0].shape for state in states):
         raise RuntimeError("native trajectory states are not equal length; cannot microbatch")
 
-    for start in range(0, len(states), batch_size):
-        chunk_state_ids = row.pre_forward_ids[start : start + batch_size]
-        batch_input_ids = torch.stack(states[start : start + batch_size], dim=0)
+    def forward(current):
+        batch_input_ids = torch.stack(list(current), dim=0)
+        if hasattr(model, "forward_hidden_states"):
+            return model.forward_hidden_states(batch_input_ids)
+        if hasattr(model, "forward_features"):
+            _attentions, hidden_states = model.forward_features(batch_input_ids)
+            return hidden_states
         _logits, _attentions, hidden_states = model.forward_attentions(
             batch_input_ids, output_hidden_states=True
         )
+        return hidden_states
+
+    for start, current, hidden_states in adaptive_forward_batches(
+        states,
+        forward,
+        initial_size=batch_size,
+        maximum_size=maximum_batch_size,
+    ):
+        chunk_state_ids = row.pre_forward_ids[start : start + len(current)]
         for offset, state_ids in enumerate(chunk_state_ids):
             timestep = start + offset
             for depth in depths:
@@ -270,7 +313,12 @@ def run_final_token(model, tokenizer, cfg: RunConfig, run_dir: Path, **_unused: 
     batch_size = cfg.runtime.timestep_batch_size
     for row in trajectories.itertuples(index=False):
         evidence, features = final_token_rows(
-            model, row, depths, collect_probe_features=collect_probe, batch_size=batch_size
+            model,
+            row,
+            depths,
+            collect_probe_features=collect_probe,
+            batch_size=batch_size,
+            maximum_batch_size=cfg.runtime.adaptive_batch_max_size,
         )
         evidence_frames.append(evidence)
         if collect_probe:

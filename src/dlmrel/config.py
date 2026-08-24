@@ -226,6 +226,10 @@ class RuntimeConfig:
     dry_run: bool = False
     selection_lock: str | None = None
     timestep_batch_size: int = 8
+    native_batch_size: int = 8
+    intervention_batch_size: int = 8
+    sentence_batch_size: int = 8
+    adaptive_batch_max_size: int = 32
     export_attention_cache: bool = False
     attention_cache: str | None = None
     pos_stage: str = "all"
@@ -250,6 +254,18 @@ class RunConfig:
         self.experiment.validate()
         if self.runtime.timestep_batch_size < 1:
             raise ConfigError("runtime timestep_batch_size must be positive")
+        if self.runtime.native_batch_size < 1:
+            raise ConfigError("runtime native_batch_size must be positive")
+        if self.runtime.intervention_batch_size < 1:
+            raise ConfigError("runtime intervention_batch_size must be positive")
+        if self.runtime.sentence_batch_size < 1:
+            raise ConfigError("runtime sentence_batch_size must be positive")
+        if self.runtime.adaptive_batch_max_size < max(
+            self.runtime.timestep_batch_size, self.runtime.sentence_batch_size
+        ):
+            raise ConfigError(
+                "runtime adaptive_batch_max_size cannot be smaller than timestep/sentence batches"
+            )
         if self.runtime.export_attention_cache and self.experiment.type != (
             "relation_head_receiver_prediction_over_diffusion_time"
         ):

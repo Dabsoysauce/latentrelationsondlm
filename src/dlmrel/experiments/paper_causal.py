@@ -10,11 +10,12 @@ import pandas as pd
 import torch
 
 from ..artifacts import ArtifactError
+from ..batching import adaptive_forward_batches
 from ..checkpoints import CheckpointIdentity, SentenceCheckpointStore
 from ..config import RunConfig
 from ..data import load_manifest_examples
-from ..diffusion import state_at_time
-from ..models.decomposition import capture_or_ablate_projection, capture_projection_inputs
+from ..diffusion import TrajectoryStateCache, state_at_time
+from ..models.decomposition import ablate_projection_batch, capture_projection_inputs
 from ..paper_protocol import PaperLockSet, projection_head_slice, write_resolved_selection_locks
 from .shared import instance_metadata, write_frames
 
@@ -70,13 +71,32 @@ def _target_rows(example, instance, state, tokenizer):
         yield target_position, int(true[target_position])
 
 
-def dla_chunk(model, tokenizer, examples, *, seed: int, timestep: int, locks, controls):
-    rows = []
+def dla_chunk(
+    model,
+    tokenizer,
+    examples,
+    *,
+    seed: int,
+    timestep: int,
+    locks,
+    controls,
+    sentence_batch_size: int = 8,
+    maximum_batch_size: int | None = None,
+    state_provider=None,
+):
     layers = sorted({lock.layer for lock in locks.locks.values()} | {item[0] for item in controls.values()})
+    materialized = []
     for example in examples:
-        state = state_at_time(model, tokenizer, example.text, timestep, 64, seed, True)
-        with capture_projection_inputs(model, layers) as (captures, metadata):
-            model.forward_attentions(state.input_ids, output_hidden_states=True)
+        state = (
+            state_provider(example, seed, timestep)
+            if state_provider is not None
+            else state_at_time(model, tokenizer, example.text, timestep, 64, seed, True)
+        )
+        materialized.append((example, state))
+    rows_by_index: dict[int, list[dict]] = {}
+
+    def score_example(example, state, captures, metadata):
+        current_rows = []
         for instance in example.relations:
             selected = locks.resolve(instance.relation)
             candidates = (
@@ -84,9 +104,7 @@ def dla_chunk(model, tokenizer, examples, *, seed: int, timestep: int, locks, co
                 ("matched_low_relation_head", *controls[instance.relation]),
             )
             for control_kind, layer, head in candidates:
-                if len(captures[layer]) != 1:
-                    raise RuntimeError("output projection was not captured exactly once")
-                captured = captures[layer][0]
+                captured = captures[layer]
                 contribution = projection_head_slice(
                     captured,
                     metadata[layer].weight,
@@ -101,7 +119,7 @@ def dla_chunk(model, tokenizer, examples, *, seed: int, timestep: int, locks, co
                     example, instance, state, tokenizer
                 ):
                     rank = _rank(contribution_logits, target)
-                    rows.append(
+                    current_rows.append(
                         {
                             **instance_metadata(example, instance, "test"),
                             "seed": seed,
@@ -123,9 +141,42 @@ def dla_chunk(model, tokenizer, examples, *, seed: int, timestep: int, locks, co
                             "projection_input_shape": list(captured.shape),
                             "projection_weight_shape": list(metadata[layer].weight.shape),
                             "number_of_heads": metadata[layer].number_of_heads,
-                            "decomposition": "exact_o_proj_input_slice_then_final_norm_unembedding",
+                            "decomposition": (
+                                "exact_o_proj_input_slice_then_final_norm_unembedding"
+                            ),
                         }
                     )
+        return current_rows
+
+    buckets: dict[int, list[tuple[int, Any]]] = {}
+    for index, (_example, state) in enumerate(materialized):
+        buckets.setdefault(state.input_ids.shape[1], []).append((index, state))
+    for bucket in buckets.values():
+        def forward(current):
+            input_ids = torch.cat([state.input_ids for _index, state in current], dim=0)
+            with capture_projection_inputs(model, layers) as (captures, batch_metadata):
+                if hasattr(model, "forward_capture_only"):
+                    model.forward_capture_only(input_ids)
+                else:
+                    model.forward_attentions(input_ids, output_hidden_states=True)
+            if any(len(captures[layer]) != 1 for layer in layers):
+                raise RuntimeError("output projection was not captured exactly once")
+            return captures, batch_metadata
+
+        for _start, current, result in adaptive_forward_batches(
+            bucket,
+            forward,
+            initial_size=sentence_batch_size,
+            maximum_size=maximum_batch_size,
+        ):
+            captures, metadata = result
+            for batch_index, (index, _state) in enumerate(current):
+                per_example = {
+                    layer: captures[layer][0][batch_index : batch_index + 1] for layer in layers
+                }
+                example, state = materialized[index]
+                rows_by_index[index] = score_example(example, state, per_example, metadata)
+    rows = [row for index in range(len(materialized)) for row in rows_by_index[index]]
     return pd.DataFrame(rows)
 
 
@@ -142,6 +193,9 @@ def run_dla(
     controls = matched_low_relation_controls(source_locks)
     store = SentenceCheckpointStore(run_dir)
     frames = []
+    state_cache = TrajectoryStateCache(
+        model, tokenizer, cfg.experiment.settings["diagnostic_timesteps"]
+    )
     for seed in cfg.experiment.seeds:
         for timestep in cfg.experiment.settings["diagnostic_timesteps"]:
             heads = source_locks.heads | set(controls.values())
@@ -164,6 +218,14 @@ def run_dla(
                         timestep=current_timestep,
                         locks=source_locks,
                         controls=controls,
+                        sentence_batch_size=cfg.runtime.sentence_batch_size,
+                        maximum_batch_size=cfg.runtime.adaptive_batch_max_size,
+                        state_provider=lambda example, requested_seed, requested_timestep: state_cache.get(
+                            example.sentence_id,
+                            example.text,
+                            requested_seed,
+                            requested_timestep,
+                        ),
                     ),
                 )
             )
@@ -217,7 +279,10 @@ def _logit_metrics(logits: torch.Tensor, query: int, target: int):
 def _pos_control_pairs() -> list[tuple[str, int, int]]:
     configured = os.environ.get("DLMREL_POS_HEAD_RANKINGS")
     if not configured:
-        return []
+        raise ArtifactError(
+            "matched causal ablation requires a completed POS run; set "
+            "DLMREL_POS_HEAD_RANKINGS to that run directory"
+        )
     source = Path(configured)
     run_dir = source if source.is_dir() else source.parent
     rankings_path = source / "pos_head_rankings.csv" if source.is_dir() else source
@@ -225,10 +290,20 @@ def _pos_control_pairs() -> list[tuple[str, int, int]]:
     if not rankings_path.is_file() or not mapping_path.is_file():
         raise ArtifactError("DLMREL_POS_HEAD_RANKINGS does not identify a complete POS run")
     rankings = pd.read_csv(rankings_path)
-    mapping = pd.read_csv(mapping_path).set_index("relative_label")
+    mapping_frame = pd.read_csv(mapping_path)
+    required_rankings = {"relative_label", "feature_kind", "accuracy_mean"}
+    required_mapping = {"relative_label", "actual_layer_index"}
+    if rankings.empty or not required_rankings.issubset(rankings.columns):
+        raise ArtifactError("POS head rankings are empty or have an incompatible schema")
+    if mapping_frame.empty or not required_mapping.issubset(mapping_frame.columns):
+        raise ArtifactError("POS relative-depth mapping is empty or has an incompatible schema")
+    mapping = mapping_frame.set_index("relative_label")
     pairs = []
     for label, group in rankings.groupby("relative_label", observed=True):
         averaged = group.groupby("feature_kind", as_index=False)["accuracy_mean"].mean()
+        averaged = averaged[averaged["feature_kind"].astype(str).str.fullmatch(r"head_\d+")]
+        if averaged.empty or label not in mapping.index:
+            raise ArtifactError(f"POS rankings are incomplete for relative depth {label}")
         ordered = averaged.sort_values(["accuracy_mean", "feature_kind"], ascending=[False, True])
         layer = int(mapping.loc[label, "actual_layer_index"])
         top = int(str(ordered.iloc[0].feature_kind).removeprefix("head_"))
@@ -242,13 +317,38 @@ def _pos_control_pairs() -> list[tuple[str, int, int]]:
     return pairs
 
 
-def ablation_chunk(model, tokenizer, examples, *, seed, timestep, locks, controls, pos_pairs):
+def _forward_logits(model, input_ids: torch.Tensor) -> torch.Tensor:
+    if hasattr(model, "forward_logits"):
+        logits = model.forward_logits(input_ids)
+    else:
+        logits, _attentions = model.forward_attentions(input_ids)
+    if logits is None:
+        raise RuntimeError("causal ablation requires final logits")
+    return logits
+
+
+def ablation_chunk(
+    model,
+    tokenizer,
+    examples,
+    *,
+    seed,
+    timestep,
+    locks,
+    controls,
+    pos_pairs,
+    intervention_batch_size: int = 8,
+    state_provider=None,
+):
+    if intervention_batch_size < 1:
+        raise ValueError("intervention_batch_size must be positive")
     rows = []
     for example in examples:
-        state = state_at_time(model, tokenizer, example.text, timestep, 64, seed, True)
-        baseline_logits, _attentions = model.forward_attentions(state.input_ids)
-        if baseline_logits is None:
-            raise RuntimeError("causal ablation requires final logits")
+        state = (
+            state_provider(example, seed, timestep)
+            if state_provider is not None
+            else state_at_time(model, tokenizer, example.text, timestep, 64, seed, True)
+        )
         requested = []
         for instance in example.relations:
             selected = locks.resolve(instance.relation)
@@ -260,25 +360,38 @@ def ablation_chunk(model, tokenizer, examples, *, seed, timestep, locks, control
                 ]
             )
 
-        # One ablated forward per distinct (layer, head) for this sentence and
-        # state. The ablated logits depend only on the input ids and the zeroed
-        # head slice, never on which relation instance asked for them, so the
-        # previous per-instance loop repeated identical full-model forwards --
-        # every POS-ranked pair was recomputed once per instance. Distinct
-        # control_kind labels that resolve to the same head still emit their own
-        # rows below; only the forward is shared.
+        # The baseline and every distinct intervention use duplicated copies of
+        # the same exact state. Projection hooks zero only the requested batch
+        # row/head, so this replaces singleton forwards without changing any
+        # intervention or downstream row ordering.
+        distinct = list(
+            dict.fromkeys(
+                (layer, head)
+                for interventions in requested
+                for _control_kind, layer, head in interventions
+            )
+        )
         ablated_cache: dict[tuple[int, int], tuple[torch.Tensor, Any]] = {}
-        for interventions in requested:
-            for _control_kind, layer, head in interventions:
-                if (layer, head) in ablated_cache:
+        baseline_logits = None
+        batched_requests: list[tuple[int, int] | None] = [None, *distinct]
+        for start in range(0, len(batched_requests), intervention_batch_size):
+            current = batched_requests[start : start + intervention_batch_size]
+            input_ids = state.input_ids.expand(len(current), -1)
+            with ablate_projection_batch(model, current) as (captures, metadata):
+                batch_logits = _forward_logits(model, input_ids)
+            if batch_logits.shape[0] != len(current):
+                raise RuntimeError("causal intervention returned an incorrect logit batch")
+            for offset, intervention in enumerate(current):
+                logits = batch_logits[offset : offset + 1]
+                if intervention is None:
+                    baseline_logits = logits
                     continue
-                with capture_or_ablate_projection(
-                    model, layer, ablate_head=head
-                ) as (captured, metadata):
-                    ablated_logits, _ablated_attentions = model.forward_attentions(state.input_ids)
-                if len(captured) != 1 or ablated_logits is None:
-                    raise RuntimeError("single-head intervention did not execute exactly once")
-                ablated_cache[(layer, head)] = (ablated_logits, metadata)
+                layer, head = intervention
+                if len(captures[layer]) != 1:
+                    raise RuntimeError("batched single-head intervention did not execute once")
+                ablated_cache[intervention] = (logits, metadata[layer])
+        if baseline_logits is None:
+            raise RuntimeError("causal intervention batch omitted the baseline")
 
         for instance, interventions in zip(example.relations, requested, strict=True):
             query = instance.attender_span[-1]
@@ -337,6 +450,9 @@ def run_ablation(
     pos_pairs = _pos_control_pairs()
     store = SentenceCheckpointStore(run_dir)
     frames = []
+    state_cache = TrajectoryStateCache(
+        model, tokenizer, cfg.experiment.settings["diagnostic_timesteps"]
+    )
     all_heads = source_locks.heads | set(controls.values()) | {
         (layer, head) for _kind, layer, head in pos_pairs
     }
@@ -362,6 +478,13 @@ def run_ablation(
                         locks=source_locks,
                         controls=controls,
                         pos_pairs=pos_pairs,
+                        intervention_batch_size=cfg.runtime.intervention_batch_size,
+                        state_provider=lambda example, requested_seed, requested_timestep: state_cache.get(
+                            example.sentence_id,
+                            example.text,
+                            requested_seed,
+                            requested_timestep,
+                        ),
                     ),
                 )
             )
@@ -399,9 +522,7 @@ def run_ablation(
         "intervention": "zero_exact_requested_o_proj_input_head_slice",
         "diagnostic_timesteps": cfg.experiment.settings["diagnostic_timesteps"],
         "seeds": list(cfg.experiment.seeds),
-        "pos_head_ablation_status": (
-            "completed" if pos_pairs else "blocked_until_exact_stanford_pos_probe_results_are_supplied"
-        ),
+        "pos_head_ablation_status": "completed",
         "pos_head_rankings_environment": "DLMREL_POS_HEAD_RANKINGS",
         "test_sentences": len(examples),
     }

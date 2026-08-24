@@ -134,13 +134,21 @@ def test_both_colab_notebooks_are_valid_thin_restart_safe_launchers():
                 ast.parse("".join(cell["source"]))
     assert "dlmrel-paper-results\" / \"dream" in rendered[0]
     assert "dlmrel-paper-results\" / \"diffullama" in rendered[1]
+    for required in (
+        "--native-batch-size",
+        "--intervention-batch-size",
+        "--sentence-batch-size",
+        "--adaptive-batch-max-size",
+        "--pos-stage",
+    ):
+        assert required in rendered[1]
     assert pins == [
         "8a56e00b1dbec4081caf1f288fec02d8da2dd600",
-        "8a56e00b1dbec4081caf1f288fec02d8da2dd600",
+        "cf0162d8f94df24b6418bc8f40355ab2f3b892e6",
     ]
 
 
-def test_fake_cli_runs_and_validates_all_ten_canonical_experiments(tmp_path, capsys):
+def test_fake_cli_runs_and_validates_all_ten_canonical_experiments(tmp_path, capsys, monkeypatch):
     results = tmp_path / "p"
 
     def launch(experiment, run_id, *, dataset="ewt", lock=None):
@@ -176,10 +184,13 @@ def test_fake_cli_runs_and_validates_all_ten_canonical_experiments(tmp_path, cap
         "matched_relation_head_ablation",
         "attention_heatmaps_and_trajectories",
     }
+    launch("pos_token_class_linear_probes", "pos")
+    pos_run = next(results.glob("*/fake/ewt/pos_token_class_linear_probes/pos"))
+    monkeypatch.setenv("DLMREL_POS_HEAD_RANKINGS", str(pos_run))
     remaining = sorted(
         experiment
         for experiment in PAPER_EXPERIMENT_TYPES
-        if experiment != "relation_head_receiver_prediction"
+        if experiment not in {"relation_head_receiver_prediction", "pos_token_class_linear_probes"}
     )
     for index, experiment in enumerate(remaining):
         if experiment == "multilingual_relation_head_transfer":

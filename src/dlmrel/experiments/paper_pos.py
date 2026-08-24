@@ -15,10 +15,11 @@ import pandas as pd
 import torch
 
 from ..artifacts import ArtifactError, atomic_json
+from ..batching import adaptive_forward_batches
 from ..checkpoints import CheckpointIdentity, SentenceCheckpointStore
 from ..config import RunConfig
 from ..data import load_manifest_examples
-from ..diffusion import state_at_time
+from ..diffusion import TrajectoryStateCache, state_at_time
 from ..models.decomposition import capture_projection_inputs
 from ..paper_protocol import map_relative_depths
 from ..stanford_pos import provision_stanford_pos, stanford_pos_identity
@@ -117,33 +118,48 @@ def stanford_labels(examples, settings: dict[str, Any]) -> dict[str, list[str | 
     return result
 
 
-def _forward_features(model, state, depth_rows):
+def _forward_feature_batch(model, states, depth_rows):
+    if not states:
+        return []
+    shape = states[0].input_ids.shape
+    if shape[0] != 1 or any(state.input_ids.shape != shape for state in states):
+        raise ValueError("POS feature batching requires equal-length singleton states")
     layers = [int(row["actual_layer_index"]) for row in depth_rows]
+    input_ids = torch.cat([state.input_ids for state in states], dim=0)
     with capture_projection_inputs(model, layers) as (captures, metadata):
-        if hasattr(model, "forward_features"):
-            _attentions, hidden_states = model.forward_features(state.input_ids)
+        if hasattr(model, "forward_hidden_states"):
+            hidden_states = model.forward_hidden_states(input_ids)
+        elif hasattr(model, "forward_features"):
+            _attentions, hidden_states = model.forward_features(input_ids)
         else:
             _logits, _attentions, hidden_states = model.forward_attentions(
-                state.input_ids, output_hidden_states=True
+                input_ids, output_hidden_states=True
             )
-    output = {}
+    outputs = [{} for _state in states]
     for depth in depth_rows:
         layer = int(depth["actual_layer_index"])
         hidden_index = min(layer + 1, len(hidden_states) - 1)
-        output[(depth["relative_label"], "residual")] = hidden_states[hidden_index][0]
         values = captures[layer]
         if len(values) != 1:
             raise RuntimeError("attention output projection did not execute exactly once")
-        concatenated = values[0][0]
+        concatenated = values[0]
         heads = metadata[layer].number_of_heads
-        if concatenated.shape[-1] % heads:
-            raise RuntimeError("captured attention width is not divisible into heads")
+        if concatenated.shape[0] != len(states) or concatenated.shape[-1] % heads:
+            raise RuntimeError("captured POS projection has an incompatible shape")
         width = concatenated.shape[-1] // heads
-        for head in range(heads):
-            output[(depth["relative_label"], f"head_{head}")] = concatenated[
-                :, head * width : (head + 1) * width
+        for batch_index, output in enumerate(outputs):
+            output[(depth["relative_label"], "residual")] = hidden_states[hidden_index][
+                batch_index
             ]
-    return output
+            for head in range(heads):
+                output[(depth["relative_label"], f"head_{head}")] = concatenated[
+                    batch_index, :, head * width : (head + 1) * width
+                ]
+    return outputs
+
+
+def _forward_features(model, state, depth_rows):
+    return _forward_feature_batch(model, [state], depth_rows)[0]
 
 
 def _eligible_words(example, state, labels):
@@ -206,14 +222,24 @@ def feature_rows(
     depth_rows,
     role: str,
     features_by_sentence: dict[str, dict] | None = None,
+    sentence_batch_size: int = 8,
+    maximum_batch_size: int | None = None,
+    state_provider=None,
 ) -> pd.DataFrame:
-    rows = []
     timestep = round(progress * 63)
+    materialized = []
     for example in examples:
-        state = state_at_time(
-            model, tokenizer, example.text, timestep, 64, seed, True
+        state = (
+            state_provider(example, seed, timestep)
+            if state_provider is not None
+            else state_at_time(model, tokenizer, example.text, timestep, 64, seed, True)
         )
-        features = _forward_features(model, state, depth_rows)
+        materialized.append((example, state))
+    precomputed = dict(features_by_sentence or {})
+    rows_by_index: dict[int, list[dict]] = {}
+
+    def build_rows(example, state, features):
+        current_rows = []
         labels = labels_by_sentence[example.sentence_id]
         eligible = _eligible_words(example, state, labels)
         reduced = _span_means(features, [span for _index, span, _label in eligible])
@@ -221,7 +247,7 @@ def feature_rows(
         for position, (word_index, _span, label) in enumerate(eligible):
             for depth in depth_rows:
                 for key in per_depth[str(depth["relative_label"])]:
-                    rows.append(
+                    current_rows.append(
                         {
                             "sentence_id": example.sentence_id,
                             "role": role,
@@ -236,6 +262,30 @@ def feature_rows(
                             "feature": reduced[key][position],
                         }
                     )
+        return current_rows
+
+    buckets: dict[int, list[tuple[int, Any]]] = {}
+    for index, (example, state) in enumerate(materialized):
+        if example.sentence_id in precomputed:
+            rows_by_index[index] = build_rows(
+                example, state, precomputed[example.sentence_id]
+            )
+        else:
+            buckets.setdefault(state.input_ids.shape[1], []).append((index, state))
+    for bucket in buckets.values():
+        def forward(current):
+            return _forward_feature_batch(model, [state for _index, state in current], depth_rows)
+
+        for _start, current, batch_features in adaptive_forward_batches(
+            bucket,
+            forward,
+            initial_size=sentence_batch_size,
+            maximum_size=maximum_batch_size,
+        ):
+            for (index, _state), features in zip(current, batch_features, strict=True):
+                example, state = materialized[index]
+                rows_by_index[index] = build_rows(example, state, features)
+    rows = [row for index in range(len(materialized)) for row in rows_by_index[index]]
     return pd.DataFrame(rows)
 
 
@@ -460,6 +510,20 @@ def _extract(model, tokenizer, cfg: RunConfig, run_dir: Path) -> None:
 
     roles = (("select", selection, selection_labels), ("test", test, test_labels))
     for role, examples, labels in roles:
+        state_cache = TrajectoryStateCache(
+            model,
+            tokenizer,
+            [round(progress * 63) for progress in cfg.experiment.normalized_progress],
+        )
+
+        def cached_state(example, requested_seed, requested_timestep, cache=state_cache):
+            return cache.get(
+                example.sentence_id,
+                example.text,
+                requested_seed,
+                requested_timestep,
+            )
+
         stage = ROLE_STAGE[role]
         for seed in cfg.experiment.seeds:
             for progress in cfg.experiment.normalized_progress:
@@ -475,7 +539,7 @@ def _extract(model, tokenizer, cfg: RunConfig, run_dir: Path) -> None:
                 store.run(
                     examples,
                     identity,
-                    lambda chunk, _start, current_seed=seed, current_progress=progress, current_labels=labels, current_role=role: feature_rows(  # noqa: E501
+                    lambda chunk, _start, current_seed=seed, current_progress=progress, current_labels=labels, current_role=role, current_state_provider=cached_state: feature_rows(  # noqa: E501
                         model,
                         tokenizer,
                         chunk,
@@ -484,6 +548,9 @@ def _extract(model, tokenizer, cfg: RunConfig, run_dir: Path) -> None:
                         progress=current_progress,
                         depth_rows=depths,
                         role=current_role,
+                        sentence_batch_size=cfg.runtime.sentence_batch_size,
+                        maximum_batch_size=cfg.runtime.adaptive_batch_max_size,
+                        state_provider=current_state_provider,
                     ),
                 )
 

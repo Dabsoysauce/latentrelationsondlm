@@ -18,6 +18,8 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from .batching import adaptive_forward_batches
+
 
 @dataclass
 class DenoisingState:
@@ -29,6 +31,46 @@ class DenoisingState:
     @property
     def n_masked(self) -> int:
         return sum(1 for v in self.is_visible if not v)
+
+
+class TrajectoryStateCache:
+    """Lazily reconstruct one exact nested trajectory per sentence and seed."""
+
+    def __init__(self, model, tokenizer, timesteps: Sequence[int], *, include_bos: bool = True):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.timesteps = tuple(sorted(set(timesteps)))
+        if not self.timesteps or self.timesteps[0] < 0 or self.timesteps[-1] >= 64:
+            raise ValueError("trajectory cache timesteps must lie in [0, 64)")
+        self.include_bos = include_bos
+        self._states: dict[tuple[str, int, int], DenoisingState] = {}
+
+    def get(self, key: str, text: str, seed: int, timestep: int) -> DenoisingState:
+        identity = (str(key), seed, timestep)
+        if identity not in self._states:
+            trajectory = teacher_forced_trajectory(
+                self.model,
+                self.tokenizer,
+                text,
+                steps=64,
+                seed=seed,
+                include_bos=self.include_bos,
+            )
+            for selected in self.timesteps:
+                state = trajectory[selected]
+                self._states[(str(key), seed, selected)] = DenoisingState(
+                    input_ids=state.input_ids.detach().cpu().clone(),
+                    tokens=list(state.tokens),
+                    is_visible=list(state.is_visible),
+                    unmask_step=list(state.unmask_step),
+                )
+        cached = self._states[identity]
+        return DenoisingState(
+            input_ids=cached.input_ids.to(self.model.device),
+            tokens=list(cached.tokens),
+            is_visible=list(cached.is_visible),
+            unmask_step=list(cached.unmask_step),
+        )
 
 
 @torch.no_grad()
@@ -200,6 +242,7 @@ def attention_batches_for_states(
     states: Sequence[DenoisingState],
     *,
     batch_size: int = 8,
+    maximum_batch_size: int | None = None,
 ) -> Iterator[tuple[int, tuple[DenoisingState, ...], tuple[torch.Tensor, ...]]]:
     """Forward equal-length trajectory states in small, memory-bounded batches.
 
@@ -214,8 +257,7 @@ def attention_batches_for_states(
     shape = materialized[0].input_ids.shape
     if shape[0] != 1 or any(state.input_ids.shape != shape for state in materialized):
         raise ValueError("trajectory microbatching requires equal-length singleton states")
-    for start in range(0, len(materialized), batch_size):
-        current = materialized[start : start + batch_size]
+    def forward(current):
         input_ids = torch.cat([state.input_ids for state in current], dim=0)
         if hasattr(model, "forward_attentions_only"):
             attentions = model.forward_attentions_only(input_ids)
@@ -223,7 +265,14 @@ def attention_batches_for_states(
             _logits, attentions = model.forward_attentions(input_ids)
         if any(layer.shape[0] != len(current) for layer in attentions):
             raise RuntimeError("adapter returned an incorrect attention batch dimension")
-        yield start, current, attentions
+        return attentions
+
+    yield from adaptive_forward_batches(
+        materialized,
+        forward,
+        initial_size=batch_size,
+        maximum_size=maximum_batch_size,
+    )
 
 
 @torch.no_grad()
@@ -255,7 +304,7 @@ def states_at_time(
     state = state_at_time(model, tokenizer, text, diffusion_time, steps, seed, include_bos)
 
     if hasattr(model, "forward_hidden_states"):
-        _, hidden = model.forward_hidden_states(state.input_ids)
+        hidden = model.forward_hidden_states(state.input_ids)
         return (), hidden, state
 
     if hasattr(model, "forward_features"):
