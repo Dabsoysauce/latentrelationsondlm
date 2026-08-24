@@ -144,7 +144,7 @@ def test_both_colab_notebooks_are_valid_thin_restart_safe_launchers():
         assert required in rendered[1]
     assert pins == [
         "8a56e00b1dbec4081caf1f288fec02d8da2dd600",
-        "cf0162d8f94df24b6418bc8f40355ab2f3b892e6",
+        "d8743b2cf5d694956321122d58362e556610110b",
     ]
 
 
