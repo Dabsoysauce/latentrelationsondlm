@@ -117,7 +117,16 @@ def _frozen_cases(examples, locks: PaperLockSet) -> list[HeatmapCase]:
     return cases
 
 
-def trajectory_chunk(model, tokenizer, cases, *, seed: int, locks: PaperLockSet, batch_size: int = 8):
+def trajectory_chunk(
+    model,
+    tokenizer,
+    cases,
+    *,
+    seed: int,
+    locks: PaperLockSet,
+    batch_size: int = 8,
+    maximum_batch_size: int | None = None,
+):
     """Score every retained timestep of every case, batching equal-length states.
 
     Each case's trajectory has one fixed sequence length throughout, so its
@@ -142,7 +151,10 @@ def trajectory_chunk(model, tokenizer, cases, *, seed: int, locks: PaperLockSet,
         ]
         selected = [states[timestep] for timestep in timesteps]
         for batch_start, batch_states, batch_attentions in attention_batches_for_states(
-            model, selected, batch_size=batch_size
+            model,
+            selected,
+            batch_size=batch_size,
+            maximum_batch_size=maximum_batch_size,
         ):
             layer_attentions = batch_attentions[lock.layer]
             for offset, state in enumerate(batch_states):
@@ -291,6 +303,7 @@ def run(
                     seed=current_seed,
                     locks=source_locks,
                     batch_size=cfg.runtime.timestep_batch_size,
+                    maximum_batch_size=cfg.runtime.adaptive_batch_max_size,
                 ),
             )
         )

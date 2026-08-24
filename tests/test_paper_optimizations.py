@@ -68,22 +68,41 @@ class ProjectionAdapter(torch.nn.Module):
         basis = torch.nn.functional.one_hot(input_ids % self.hidden, self.hidden).float()
         return tuple(basis + index * 0.25 for index in range(self.n_layers + 1))
 
-    @torch.no_grad()
-    def forward_attentions(self, input_ids, output_hidden_states: bool = False):
+    def _forward_core(self, input_ids):
         self.forward_calls += 1
         hidden_states = self._hidden(input_ids)
-        seq = input_ids.shape[1]
-        attentions = tuple(
-            torch.full((1, self.heads, seq, seq), 1.0 / seq) for _ in range(self.n_layers)
-        )
-        # Drive every o_proj so capture/ablate hooks fire exactly once per layer.
         logits = hidden_states[-1] @ self.unembed
         for index, block in enumerate(self.denoise_model.layers):
             contribution = block.self_attn.o_proj(hidden_states[index])
             logits = logits + contribution @ self.unembed
+        return logits, hidden_states
+
+    @torch.no_grad()
+    def forward_attentions(self, input_ids, output_hidden_states: bool = False):
+        logits, hidden_states = self._forward_core(input_ids)
+        seq = input_ids.shape[1]
+        attentions = tuple(
+            torch.full((input_ids.shape[0], self.heads, seq, seq), 1.0 / seq)
+            for _ in range(self.n_layers)
+        )
         if output_hidden_states:
             return logits, attentions, hidden_states
         return logits, attentions
+
+    def forward_logits(self, input_ids):
+        return self._forward_core(input_ids)[0]
+
+    def forward_hidden_states(self, input_ids):
+        return self._forward_core(input_ids)[1]
+
+    def forward_capture_only(self, input_ids):
+        self._forward_core(input_ids)
+
+    def get_final_norm(self):
+        return torch.nn.Identity()
+
+    def get_lm_head(self):
+        return lambda values: values @ self.unembed
 
 
 def _example(sentence_id: str = "s1", words: int = 24) -> Example:
@@ -212,10 +231,13 @@ class _Locks:
 
     def __init__(self, mapping):
         self.mapping = mapping
+        self.locks = {
+            relation: type("Lock", (), {"layer": layer, "head": head})()
+            for relation, (layer, head) in mapping.items()
+        }
 
     def resolve(self, relation):
-        layer, head = self.mapping[relation]
-        return type("Lock", (), {"layer": layer, "head": head})()
+        return self.locks[relation]
 
 
 def _relation_example(relation_count: int) -> Example:
@@ -318,11 +340,11 @@ def test_optimized_ablation_runs_fewer_forwards():
     ablation_chunk(model, tokenizer, [_relation_example(4)], **arguments)
     optimized_calls = model.forward_calls
 
-    # The optimized count is exactly one baseline plus the distinct (layer, head)
-    # set, derived here rather than hardcoded so the assertion stays meaningful.
+    # Baseline plus all distinct interventions fit in one batch of eight.
     distinct = {(0, 1), (2, 0), (1, 2), (0, 3)} | {(layer, head) for _kind, layer, head in pos_pairs}
     assert reference_calls == 1 + 4 * 5
-    assert optimized_calls == 1 + len(distinct)
+    assert optimized_calls == 1
+    assert 1 + len(distinct) == 8
     assert optimized_calls < reference_calls
 
 
@@ -343,6 +365,72 @@ def test_distinct_control_kinds_sharing_a_head_keep_separate_rows():
         "most_pos_decodable_early",
         "lower_pos_decoding_early",
     }
+
+
+def test_causal_ablation_fails_closed_without_pos_rankings(monkeypatch):
+    from dlmrel.artifacts import ArtifactError
+    from dlmrel.experiments.paper_causal import _pos_control_pairs
+
+    monkeypatch.delenv("DLMREL_POS_HEAD_RANKINGS", raising=False)
+    with pytest.raises(ArtifactError, match="requires a completed POS run"):
+        _pos_control_pairs()
+
+
+def test_equal_length_pos_sentences_batch_without_changing_rows():
+    model, tokenizer = ProjectionAdapter(), TinyTokenizer()
+    depths = map_relative_depths(model.n_layers, {"early": 0.2, "middle": 0.5, "late": 0.9})
+    examples = [_example("s1"), _example("s2")]
+    labels = {"s1": _labels()["s1"], "s2": _labels()["s1"]}
+    arguments = dict(
+        labels_by_sentence=labels,
+        seed=42,
+        progress=0.5,
+        depth_rows=depths,
+        role="test",
+    )
+    reference = feature_rows(
+        ProjectionAdapter(), tokenizer, examples, sentence_batch_size=1, **arguments
+    )
+    model.forward_calls = 0
+    optimized = feature_rows(model, tokenizer, examples, sentence_batch_size=8, **arguments)
+    pd.testing.assert_frame_equal(reference, optimized, check_exact=True)
+    assert model.forward_calls == 1
+
+
+def test_equal_length_dla_sentences_batch_without_changing_rows():
+    from dlmrel.experiments.paper_causal import dla_chunk
+
+    tokenizer = TinyTokenizer()
+    locks = _Locks({"object_to_verb": (0, 1), "subject_to_verb": (1, 2)})
+    controls = {"object_to_verb": (2, 0), "subject_to_verb": (0, 3)}
+    first = _relation_example(2)
+    second = _relation_example(2)
+    second.sentence_id = "s2"
+    examples = [first, second]
+    model = ProjectionAdapter()
+    reference = dla_chunk(
+        model,
+        tokenizer,
+        examples,
+        seed=42,
+        timestep=0,
+        locks=locks,
+        controls=controls,
+        sentence_batch_size=1,
+    )
+    model.forward_calls = 0
+    optimized = dla_chunk(
+        model,
+        tokenizer,
+        examples,
+        seed=42,
+        timestep=0,
+        locks=locks,
+        controls=controls,
+        sentence_batch_size=8,
+    )
+    pd.testing.assert_frame_equal(reference, optimized, check_exact=True)
+    assert model.forward_calls == 1
 
 
 def _prepare_run_dir(tmp_path):

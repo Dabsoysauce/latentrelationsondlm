@@ -35,10 +35,142 @@ def _top_p_sample(logits: torch.Tensor, *, temperature: float, top_p: float) -> 
 
 
 def _forward_logits(adapter, input_ids: torch.Tensor) -> torch.Tensor:
-    logits, _attentions = adapter.forward_attentions(input_ids)
+    if hasattr(adapter, "forward_logits"):
+        logits = adapter.forward_logits(input_ids)
+    else:
+        logits, _attentions = adapter.forward_attentions(input_ids)
     if logits is None:
         raise RuntimeError("native generation requires adapter logits")
     return logits
+
+
+def _capture_rng_state() -> tuple[torch.Tensor, list[torch.Tensor], object]:
+    cuda = [state.clone() for state in torch.cuda.get_rng_state_all()] if torch.cuda.is_available() else []
+    return torch.get_rng_state().clone(), cuda, random.getstate()
+
+
+def _restore_rng_state(state: tuple[torch.Tensor, list[torch.Tensor], object]) -> None:
+    cpu, cuda, python = state
+    torch.set_rng_state(cpu)
+    if cuda:
+        torch.cuda.set_rng_state_all(cuda)
+    random.setstate(python)
+
+
+def _seeded_rng_state(seed: int) -> tuple[torch.Tensor, list[torch.Tensor], object]:
+    torch.manual_seed(seed)
+    random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    return _capture_rng_state()
+
+
+@torch.inference_mode()
+def random_reveal_trajectories(
+    adapter,
+    tokenizer,
+    prompts: list[str],
+    *,
+    seed: int,
+    steps: int = 64,
+    generation_length: int = 96,
+    temperature: float = 0.95,
+    top_p: float = 0.9,
+    **_unused: Any,
+) -> tuple[NativeTrajectory, ...]:
+    """Batch independent prompts while replaying each trajectory's exact RNG stream.
+
+    The legacy sampler resets the global CPU, CUDA, and Python RNGs to ``seed``
+    for every prompt. This implementation gives each batch row its own snapshot
+    of precisely that seeded global state, restores it for the row's sampling
+    and reveal draws, and saves the advanced state for the next reverse step.
+    Consequently each row consumes the same random numbers in the same order as
+    an isolated ``random_reveal_trajectory`` call; only the deterministic model
+    forward is shared.
+    """
+    if not prompts:
+        return ()
+    if steps != 64:
+        raise ValueError("paper native trajectories require exactly 64 steps")
+    if tokenizer is None or tokenizer.mask_token_id is None:
+        raise RuntimeError("native generation requires a tokenizer mask token")
+
+    prefixes = []
+    for prompt in prompts:
+        prefix = [tokenizer.bos_token_id, *tokenizer.encode(prompt, add_special_tokens=False)]
+        prefixes.append(prefix[: generation_length - 1])
+    prefix_lengths = [len(prefix) for prefix in prefixes]
+    base = torch.tensor(
+        [prefix + [0] * (generation_length - len(prefix)) for prefix in prefixes],
+        dtype=torch.long,
+        device=adapter.device,
+    )
+    maskable = torch.zeros_like(base, dtype=torch.bool)
+    for batch_index, prefix_length in enumerate(prefix_lengths):
+        maskable[batch_index, prefix_length:] = True
+    xt = base.masked_fill(maskable, int(tokenizer.mask_token_id))
+    current_mask = maskable.clone()
+
+    initial_rng = _seeded_rng_state(seed)
+    rng_states = [
+        (initial_rng[0].clone(), [item.clone() for item in initial_rng[1]], initial_rng[2])
+        for _prompt in prompts
+    ]
+    states: list[list[torch.Tensor]] = [[] for _prompt in prompts]
+    predictions: list[list[torch.Tensor]] = [[] for _prompt in prompts]
+    final_samples = xt.clone()
+
+    for step_index in range(steps):
+        for batch_index in range(len(prompts)):
+            states[batch_index].append(xt[batch_index].detach().cpu().clone())
+        raw_logits = _forward_logits(adapter, xt)
+        logits = aligned_logits(raw_logits, xt, int(adapter.prediction_offset))
+        remaining_steps = steps - step_index
+        for batch_index in range(len(prompts)):
+            predictions[batch_index].append(
+                logits[batch_index].argmax(dim=-1).detach().cpu().clone()
+            )
+            _restore_rng_state(rng_states[batch_index])
+            row_logits = logits[batch_index : batch_index + 1]
+            sampled = _top_p_sample(row_logits, temperature=temperature, top_p=top_p)
+            row_mask = current_mask[batch_index : batch_index + 1]
+            final = xt[batch_index : batch_index + 1].masked_scatter(
+                row_mask, sampled[row_mask]
+            )
+            reveal = row_mask & (
+                torch.rand_like(row_mask, dtype=torch.float) < (1.0 / remaining_steps)
+            )
+            if remaining_steps == 1:
+                reveal = row_mask
+            xt[batch_index : batch_index + 1] = xt[
+                batch_index : batch_index + 1
+            ].masked_scatter(reveal, final[reveal])
+            current_mask[batch_index : batch_index + 1] &= ~reveal
+            final_samples[batch_index : batch_index + 1] = final
+            rng_states[batch_index] = _capture_rng_state()
+
+    return tuple(
+        NativeTrajectory(
+            prompt=prompt,
+            prefix_length=prefix_lengths[index],
+            pre_forward_ids=tuple(states[index]),
+            argmax_ids=tuple(predictions[index]),
+            final_ids=final_samples[index].detach().cpu().clone(),
+            metadata={
+                "steps": steps,
+                "generation_length": generation_length,
+                "temperature": temperature,
+                "top_p": top_p,
+                "reveal_policy": "random_one_over_remaining_steps",
+                "seed": seed,
+                "prediction_offset": int(adapter.prediction_offset),
+                "pre_forward_states": True,
+                "batched_forward": True,
+                "rng_equivalence": "per_trajectory_global_state_replay",
+            },
+        )
+        for index, prompt in enumerate(prompts)
+    )
 
 
 @torch.inference_mode()

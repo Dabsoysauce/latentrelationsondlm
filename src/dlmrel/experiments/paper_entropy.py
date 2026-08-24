@@ -34,6 +34,7 @@ def entropy_trajectory_chunk(
     seed: int,
     depth_rows,
     batch_size: int = 8,
+    maximum_batch_size: int | None = None,
 ) -> pd.DataFrame:
     rows = []
     for example in examples:
@@ -49,6 +50,7 @@ def entropy_trajectory_chunk(
             model,
             [state for _timestep, state in indexed_states],
             batch_size=batch_size,
+            maximum_batch_size=maximum_batch_size,
         ):
             for batch_index, state in enumerate(current):
                 timestep = indexed_states[start + batch_index][0]
@@ -247,6 +249,7 @@ def run(
                         seed=current_seed,
                         depth_rows=depths,
                         batch_size=cfg.runtime.timestep_batch_size,
+                        maximum_batch_size=cfg.runtime.adaptive_batch_max_size,
                     ),
                 )
             )

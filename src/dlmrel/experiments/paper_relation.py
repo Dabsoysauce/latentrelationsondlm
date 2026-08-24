@@ -291,6 +291,7 @@ def score_time_and_entropy_chunk(
     seed: int,
     locks: PaperLockSet,
     batch_size: int,
+    maximum_batch_size: int | None = None,
     depth_rows=None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     relation_rows = []
@@ -308,6 +309,7 @@ def score_time_and_entropy_chunk(
             model,
             [state for _timestep, state in indexed_states],
             batch_size=batch_size,
+            maximum_batch_size=maximum_batch_size,
         ):
             for batch_index, state in enumerate(current):
                 timestep = indexed_states[start + batch_index][0]
@@ -357,6 +359,7 @@ def score_time_chunk(
     seed: int,
     locks: PaperLockSet,
     batch_size: int = 8,
+    maximum_batch_size: int | None = None,
 ) -> pd.DataFrame:
     relation, _entropy = score_time_and_entropy_chunk(
         model,
@@ -365,6 +368,7 @@ def score_time_chunk(
         seed=seed,
         locks=locks,
         batch_size=batch_size,
+        maximum_batch_size=maximum_batch_size,
     )
     return relation
 
@@ -446,6 +450,7 @@ def run_time_or_transfer(
                     seed=current_seed,
                     locks=source_locks,
                     batch_size=cfg.runtime.timestep_batch_size,
+                    maximum_batch_size=cfg.runtime.adaptive_batch_max_size,
                     depth_rows=depth_rows,
                 ),
             ):
@@ -463,6 +468,7 @@ def run_time_or_transfer(
                         seed=current_seed,
                         locks=source_locks,
                         batch_size=cfg.runtime.timestep_batch_size,
+                        maximum_batch_size=cfg.runtime.adaptive_batch_max_size,
                     ),
                 )
             )

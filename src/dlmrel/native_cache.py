@@ -122,3 +122,40 @@ class NativeTrajectoryCache:
                 self.store(example.sentence_id, seed, frame)
                 frames.append(frame)
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    def get_or_generate_batched(
+        self,
+        examples: list,
+        seeds: list[int],
+        generate_many: Callable[[list[Any], int], pd.DataFrame],
+        *,
+        batch_size: int,
+    ) -> pd.DataFrame:
+        """Generate missing pairs in prompt batches while retaining pair-level resume files."""
+        if batch_size < 1:
+            raise ValueError("native prompt batch_size must be positive")
+        frames = []
+        for seed in seeds:
+            missing = []
+            for example in examples:
+                cached = self.load(example.sentence_id, seed)
+                if cached is None:
+                    missing.append(example)
+                else:
+                    frames.append(cached)
+            for start in range(0, len(missing), batch_size):
+                current = missing[start : start + batch_size]
+                generated = generate_many(current, seed)
+                if len(generated) != len(current) or "prompt_id" not in generated:
+                    raise RuntimeError("batched native generation returned an invalid frame")
+                for example in current:
+                    frame = generated[
+                        generated["prompt_id"].astype(str) == str(example.sentence_id)
+                    ].copy()
+                    if len(frame) != 1:
+                        raise RuntimeError(
+                            "batched native generation must return exactly one row per prompt"
+                        )
+                    self.store(example.sentence_id, seed, frame)
+                    frames.append(frame)
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()

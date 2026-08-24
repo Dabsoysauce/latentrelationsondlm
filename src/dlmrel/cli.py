@@ -64,6 +64,10 @@ def resolve_run(args) -> RunConfig:
         dry_run=args.dry_run,
         selection_lock=args.selection_lock,
         timestep_batch_size=args.timestep_batch_size,
+        native_batch_size=args.native_batch_size,
+        intervention_batch_size=args.intervention_batch_size,
+        sentence_batch_size=args.sentence_batch_size,
+        adaptive_batch_max_size=args.adaptive_batch_max_size,
         export_attention_cache=args.export_attention_cache,
         attention_cache=args.attention_cache,
         pos_stage=args.pos_stage,
@@ -209,6 +213,10 @@ def work_estimate(cfg: RunConfig) -> dict:
         "estimated_forward_passes": logical_forward_states,
         "logical_forward_states": logical_forward_states,
         "timestep_batch_size": cfg.runtime.timestep_batch_size,
+        "native_batch_size": cfg.runtime.native_batch_size,
+        "intervention_batch_size": cfg.runtime.intervention_batch_size,
+        "sentence_batch_size": cfg.runtime.sentence_batch_size,
+        "adaptive_batch_max_size": cfg.runtime.adaptive_batch_max_size,
         "estimated_model_forward_calls": model_forward_calls,
         "attention_cache_reused": bool(cfg.runtime.attention_cache),
     }
@@ -389,6 +397,30 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=8,
         help="number of equal-length trajectory states forwarded together",
+    )
+    run.add_argument(
+        "--native-batch-size",
+        type=int,
+        default=8,
+        help="number of independent fixed-length native prompt trajectories forwarded together",
+    )
+    run.add_argument(
+        "--intervention-batch-size",
+        type=int,
+        default=8,
+        help="baseline/intervention copies evaluated together during causal ablation",
+    )
+    run.add_argument(
+        "--sentence-batch-size",
+        type=int,
+        default=8,
+        help="initial equal-token-length POS/DLA sentence batch size",
+    )
+    run.add_argument(
+        "--adaptive-batch-max-size",
+        type=int,
+        default=32,
+        help="safe upper bound for successful timestep and sentence batch growth",
     )
     run.add_argument(
         "--export-attention-cache",
