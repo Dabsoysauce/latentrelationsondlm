@@ -192,6 +192,33 @@ def test_parallel_fit_is_exactly_equivalent_to_sequential_fit(tmp_path, monkeypa
         pd.testing.assert_frame_equal(left, right, check_exact=True)
 
 
+def test_fit_stages_features_locally_but_keeps_atomic_results_in_run_dir(
+    tmp_path, monkeypatch
+):
+    _patch_pos_dependencies(monkeypatch)
+    run_dir = _prepare_run_dir(tmp_path / "run")
+    cache = tmp_path / "local-cache"
+    base = _cfg()
+    cfg = RunConfig(
+        experiment=base.experiment,
+        runtime=RuntimeConfig(pos_fit_workers=2, pos_feature_cache=str(cache)),
+    )
+    paper_pos.run(ProjectionAdapter(), TinyTokenizer(), cfg, run_dir, pos_stage="extract")
+    paper_pos.run(
+        None,
+        None,
+        cfg,
+        run_dir,
+        pos_stage="fit",
+        manifest_hashes={"select": "sha256:aaa", "test": "sha256:bbb"},
+    )
+
+    assert list(cache.rglob("paper-pos-selection-features*.parquet"))
+    assert list(cache.rglob("paper-pos-test-features*.parquet"))
+    assert not list(cache.rglob("fit_checkpoints"))
+    assert list((run_dir / "fit_checkpoints").glob("*.parquet"))
+
+
 def test_t0_reuses_seed_42_with_zero_extra_model_forwards(tmp_path, monkeypatch):
     run_dir = _prepare_run_dir(tmp_path)
     model, tokenizer = ProjectionAdapter(), TinyTokenizer()

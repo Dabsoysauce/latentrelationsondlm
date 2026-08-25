@@ -23,6 +23,7 @@ EXECUTION_ONLY_RUNTIME_FIELDS = {
     "sentence_batch_size",
     "adaptive_batch_max_size",
     "pos_fit_workers",
+    "pos_feature_cache",
     "export_attention_cache",
     "attention_cache",
     "pos_stage",

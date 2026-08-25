@@ -231,6 +231,7 @@ class RuntimeConfig:
     sentence_batch_size: int = 8
     adaptive_batch_max_size: int = 32
     pos_fit_workers: int = 1
+    pos_feature_cache: str | None = None
     export_attention_cache: bool = False
     attention_cache: str | None = None
     pos_stage: str = "all"
