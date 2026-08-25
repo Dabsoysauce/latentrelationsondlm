@@ -8,6 +8,7 @@ import pytest
 
 from dlmrel.artifacts import (
     ArtifactError,
+    _observation_identity_columns,
     atomic_json,
     canonical_hash,
     final_artifact_hashes,
@@ -234,6 +235,33 @@ def test_validator_detects_modified_instances_and_duplicate_rows(tmp_path):
 
     assert "instances artifact contains duplicate observations" in result["errors"]
     assert "instance Parquet and JSON shards differ" in result["errors"]
+
+
+def test_observation_identity_distinguishes_dla_targets_and_controls():
+    rows = pd.DataFrame(
+        [
+            {
+                "instance_id": "i0",
+                "seed": 42,
+                "timestep": 20,
+                "layer": 3,
+                "head": 4,
+                "target_position": target_position,
+                "control_kind": control_kind,
+            }
+            for target_position, control_kind in (
+                (5, "selected_relation_head"),
+                (6, "selected_relation_head"),
+                (5, "matched_low_relation_head"),
+            )
+        ]
+    )
+
+    identity = _observation_identity_columns(rows)
+
+    assert not rows.duplicated(identity).any()
+    duplicated = pd.concat([rows, rows.iloc[[0]]], ignore_index=True)
+    assert duplicated.duplicated(identity).any()
 
 
 def test_validator_detects_infinite_metric_and_nonfinite_json(tmp_path):

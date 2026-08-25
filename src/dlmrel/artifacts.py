@@ -39,6 +39,29 @@ class ArtifactError(RuntimeError):
     pass
 
 
+def _observation_identity_columns(instances: pd.DataFrame) -> list[str]:
+    """Return the dimensions that uniquely identify one scientific observation."""
+    base_identity = "instance_id" if "instance_id" in instances else "sentence_id"
+    return [
+        column
+        for column in (
+            base_identity,
+            "word_index",
+            "seed",
+            "timestep",
+            "normalized_progress",
+            "relation",
+            "layer",
+            "head",
+            "depth",
+            "position",
+            "target_position",
+            "control_kind",
+        )
+        if column in instances
+    ]
+
+
 def canonical_hash(value: Any) -> str:
     encoded = json.dumps(
         json_compatible(value),
@@ -440,23 +463,7 @@ def validate_run(path: str | Path) -> dict[str, Any]:
         if instances.empty:
             errors.append("instances artifact is empty")
         _validate_finite_table(instances, "instances", errors)
-        base_identity = "instance_id" if "instance_id" in instances else "sentence_id"
-        observation_columns = [
-            column
-            for column in (
-                base_identity,
-                "word_index",
-                "seed",
-                "timestep",
-                "normalized_progress",
-                "relation",
-                "layer",
-                "head",
-                "depth",
-                "position",
-            )
-            if column in instances
-        ]
+        observation_columns = _observation_identity_columns(instances)
         if observation_columns and instances.duplicated(observation_columns).any():
             errors.append("instances artifact contains duplicate observations")
         try:
