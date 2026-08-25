@@ -264,6 +264,40 @@ def test_observation_identity_distinguishes_dla_targets_and_controls():
     assert duplicated.duplicated(identity).any()
 
 
+def test_observation_identity_distinguishes_depths_and_pos_features():
+    final_token_rows = pd.DataFrame(
+        [
+            {
+                "sentence_id": "s0",
+                "seed": 42,
+                "timestep": 12,
+                "target_position": 5,
+                "relative_label": relative_label,
+                "actual_layer_index": layer,
+            }
+            for relative_label, layer in (("early", 5), ("middle", 14), ("late", 24))
+        ]
+    )
+    pos_rows = pd.DataFrame(
+        [
+            {
+                "sentence_id": "s0",
+                "word_index": 3,
+                "seed": 42,
+                "normalized_progress": 0.5,
+                "relative_label": "middle",
+                "feature_kind": feature_kind,
+            }
+            for feature_kind in ("residual", "head_0", "head_1")
+        ]
+    )
+
+    assert not final_token_rows.duplicated(
+        _observation_identity_columns(final_token_rows)
+    ).any()
+    assert not pos_rows.duplicated(_observation_identity_columns(pos_rows)).any()
+
+
 def test_validator_detects_infinite_metric_and_nonfinite_json(tmp_path):
     run = _complete_valid_run(tmp_path)
     pd.DataFrame([{"accuracy": float("inf")}]).to_csv(run / "metrics.csv", index=False)

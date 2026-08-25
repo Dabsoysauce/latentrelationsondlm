@@ -56,6 +56,11 @@ def _observation_identity_columns(instances: pd.DataFrame) -> list[str]:
             "depth",
             "position",
             "target_position",
+            "prediction_source_position",
+            "prediction_offset",
+            "relative_label",
+            "actual_layer_index",
+            "feature_kind",
             "control_kind",
         )
         if column in instances
