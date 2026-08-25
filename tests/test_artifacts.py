@@ -238,12 +238,13 @@ def test_validator_detects_modified_instances_and_duplicate_rows(tmp_path):
 
 def test_validator_distinguishes_native_token_and_depth_observations(tmp_path):
     run = _complete_valid_run(tmp_path)
-    instances = pd.read_parquet(run / "instances.parquet").iloc[:1]
+    instances = pd.read_parquet(run / "instances.parquet")
     native_rows = pd.concat([instances, instances], ignore_index=True)
-    native_rows["relative_label"] = ["early", "middle"]
-    native_rows["actual_layer_index"] = [6, 16]
-    native_rows["target_position"] = [18, 19]
-    native_rows["prediction_source_position"] = [17, 18]
+    n_rows = len(instances)
+    native_rows["relative_label"] = ["early"] * n_rows + ["middle"] * n_rows
+    native_rows["actual_layer_index"] = [6] * n_rows + [16] * n_rows
+    native_rows["target_position"] = [18] * n_rows + [19] * n_rows
+    native_rows["prediction_source_position"] = [17] * n_rows + [18] * n_rows
     for shard in (run / "checkpoints").glob("shard-*.json"):
         shard.unlink()
     write_frames(run, raw=native_rows, exclusions=pd.DataFrame())
