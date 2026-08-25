@@ -21,6 +21,9 @@ BASE_COMMIT = "fff83d1f27d69927babd1d86085e220021a581f6"
 IMPLEMENTATION_COMMIT = "15e78bda770c17feba79f0d36beea310a8af9abe"
 IMPLEMENTATION_TREE = "6cfa96e4e13cc249134ddec694db15202240eb38"
 IMPLEMENTATION_PATCH_SHA256 = "d7fa1cf714cbac8c705a8d41a6a4b42306ad93512d247311764b78f08466a039"
+OPTIMIZATION_COMMIT = "136e289"
+OPTIMIZED_TREE = "ee0269a58b4523dccfd17bd66e17802e413a0e8e"
+OPTIMIZATION_PATCH_SHA256 = "f9100e180fd86b99086cb2b8be678c0635a7280940d080ad73451b744095bdb0"
 REPOSITORY = "https://github.com/Dabsoysauce/latentrelationsondlm.git"
 RUN_ID = "paper-restoration-v1-diffullama-pos-token-class-linear-probes"
 RESULTS_ROOT = Path("/content/drive/MyDrive/dlmrel-paper-results (1)/diffullama")
@@ -318,6 +321,18 @@ IMPLEMENTATION_PATCH_GZIP_BASE64 = (
     "B9nPJVwUBjuDwWi2QwDRa0LBztOBo9yAeetnbQfpRnuP4bif3TvYq2hJMfaptEvO2t3jKeV39JGBmhT2gU/mD1xB9wF41q67xt7Q"
     "TcdtwC0J6lCQ3QOoB4/wHfBz738DszlFwXMxAQA="
 )
+OPTIMIZATION_PATCH_GZIP_BASE64 = (
+    "H4sIAAAAAAAACqVTTW/bRhC961cMdCIrak2rboIYJWDAbU8FWtRAL4ZBTLhDeZv9IGaHjZRfXyyXimVXSgWUOogazXs77+0b"
+    "bfoe1uutEcCryN2Vto7JXtFuIDaOvMSrAQfidghRDXv4eEnXwnhNO6jrH/Tm5oNS+n1dd/odXNf1u5ubxXq9vuy0xWq1uvD"
+    "EuztY33y/qTbvYTV9f4C7O9DUQ9sbKXpGR7cwaPUTCv6SflXwXQWRSN+C8VIB03a0yOYLign+FnobUMrbBaTH9GDJF5Gk2J"
+    "cl/Aib+Y/0MJpI8CfakX5mDlwsf//tASJZ6hIV9IQyMkXoghc0qfCZGOQZPcjnAJ3FGCkuy0wZO7TE0MCDoNfI+mEqFKVKS"
+    "nblYvW1S7c7aGaAEkYf+8Au9UxME7HpzcT2a9iaKKb7g7ZMMZrgixcJ981r+RU43LVGiJtNXdcVMHodXBsFhZrk2mKdcHmm"
+    "EwNUsC9zC5OM7Ochq6OZKthVsM9qjnh0m8qzym+Dj/oXkD7TfdPfaEcUKnojQroCYTT+7eULRflWIA4333NwED9ZQvbKGk/I"
+    "rQuaLBg3BJYTvp4AOhI2XTxgsOtGxm7fxi4wVdBf57cFZM9O6Z1UJK35ZQ8NZIFHeTgHmY06TzFNnCyZAuUHFQW7T0WqPC"
+    "7n/C6flMOh8IPCiMy4L8sjXCLL7RY/kl0+KQmtH92wL+YgDEza5I1ojsZUc/3fKcrzlK8D/3XIc+25+6LDDmyzDod/BTaSl"
+    "NyH0QtxMRtVKheitF1wLvjiunysnx7rp4xiv82W5RVRmnocrbTst0VK02Grn8e+T0dORmVa1YXJngOPmpuKl+Y36P/e4yOt"
+    "9/9ziyXHpayOhi8vva5XG/0SxHNEb65iHnTCQTN54wM7tEU0X6iZ+VR8xoHeQCjKKcTEfgowp/uMs/8Abp1EVyEHAAA="
+)
 
 
 def run(*args: str, cwd: Path | None = None) -> None:
@@ -380,7 +395,21 @@ tree = subprocess.check_output(
 ).strip()
 if tree != IMPLEMENTATION_TREE:
     raise RuntimeError(f"Reviewed implementation tree mismatch: {tree}")
-print(f"Verified implementation {IMPLEMENTATION_COMMIT} tree {tree}")
+optimization_bytes = gzip.decompress(base64.b64decode(OPTIMIZATION_PATCH_GZIP_BASE64))
+if hashlib.sha256(optimization_bytes).hexdigest() != OPTIMIZATION_PATCH_SHA256:
+    raise RuntimeError("Embedded exact-optimization patch failed SHA-256 validation")
+optimization_path = Path("/content/dlmrel-pos-exact-optimization.patch")
+optimization_path.write_bytes(optimization_bytes)
+run("git", "apply", "--index", str(optimization_path), cwd=CHECKOUT)
+optimized_tree = subprocess.check_output(
+    ["git", "write-tree"], cwd=CHECKOUT, text=True
+).strip()
+if optimized_tree != OPTIMIZED_TREE:
+    raise RuntimeError(f"Exact-optimized implementation tree mismatch: {optimized_tree}")
+print(
+    f"Verified implementation {IMPLEMENTATION_COMMIT} plus optimization "
+    f"{OPTIMIZATION_COMMIT}, tree {optimized_tree}"
+)
 
 run("python", "-m", "pip", "install", "-q", "-e", ".[dev]", cwd=CHECKOUT)
 
