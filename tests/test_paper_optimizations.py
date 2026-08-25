@@ -7,12 +7,18 @@ fails here rather than silently producing different numbers.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 import torch
 
 from dlmrel.diffusion import state_at_time
-from dlmrel.experiments.paper_causal import _logit_metrics, _target_rows
+from dlmrel.experiments.paper_causal import (
+    _logit_metrics,
+    _target_rows,
+    matched_low_relation_controls,
+)
 from dlmrel.experiments.paper_pos import _forward_features, feature_rows
 from dlmrel.models.decomposition import capture_or_ablate_projection
 from dlmrel.paper_protocol import map_relative_depths
@@ -88,7 +94,6 @@ class ProjectionAdapter(torch.nn.Module):
         if output_hidden_states:
             return logits, attentions, hidden_states
         return logits, attentions
-
     def forward_logits(self, input_ids):
         return self._forward_core(input_ids)[0]
 
@@ -103,6 +108,21 @@ class ProjectionAdapter(torch.nn.Module):
 
     def get_lm_head(self):
         return lambda values: values @ self.unembed
+
+
+def test_matched_low_relation_controls_reads_head_column(tmp_path):
+    pd.DataFrame(
+        [
+            {"relation": "obj", "layer": 2, "head": 1, "accuracy": 0.8, "n_total": 20},
+            {"relation": "obj", "layer": 2, "head": 3, "accuracy": 0.2, "n_total": 20},
+        ]
+    ).to_csv(tmp_path / "selection_all_head_scores.csv", index=False)
+    locks = SimpleNamespace(
+        source=tmp_path / "selection-locks",
+        locks={"obj": SimpleNamespace(layer=2, head=1)},
+    )
+
+    assert matched_low_relation_controls(locks) == {"obj": (2, 3)}
 
 
 def _example(sentence_id: str = "s1", words: int = 24) -> Example:

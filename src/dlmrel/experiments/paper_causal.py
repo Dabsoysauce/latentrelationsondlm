@@ -53,7 +53,7 @@ def matched_low_relation_controls(locks: PaperLockSet) -> dict[str, tuple[int, i
         if candidates.empty:
             raise ArtifactError(f"no matched low-relation control for {relation}")
         row = candidates.iloc[0]
-        controls[relation] = (int(row.layer), int(row.head))
+        controls[relation] = (int(row["layer"]), int(row["head"]))
     return controls
 
 
