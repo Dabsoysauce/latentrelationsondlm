@@ -8,6 +8,7 @@ import pytest
 
 from dlmrel.artifacts import (
     ArtifactError,
+    _observation_identity_columns,
     atomic_json,
     canonical_hash,
     final_artifact_hashes,
@@ -234,6 +235,67 @@ def test_validator_detects_modified_instances_and_duplicate_rows(tmp_path):
 
     assert "instances artifact contains duplicate observations" in result["errors"]
     assert "instance Parquet and JSON shards differ" in result["errors"]
+
+
+def test_observation_identity_distinguishes_dla_targets_and_controls():
+    rows = pd.DataFrame(
+        [
+            {
+                "instance_id": "i0",
+                "seed": 42,
+                "timestep": 20,
+                "layer": 3,
+                "head": 4,
+                "target_position": target_position,
+                "control_kind": control_kind,
+            }
+            for target_position, control_kind in (
+                (5, "selected_relation_head"),
+                (6, "selected_relation_head"),
+                (5, "matched_low_relation_head"),
+            )
+        ]
+    )
+
+    identity = _observation_identity_columns(rows)
+
+    assert not rows.duplicated(identity).any()
+    duplicated = pd.concat([rows, rows.iloc[[0]]], ignore_index=True)
+    assert duplicated.duplicated(identity).any()
+
+
+def test_observation_identity_distinguishes_depths_and_pos_features():
+    final_token_rows = pd.DataFrame(
+        [
+            {
+                "sentence_id": "s0",
+                "seed": 42,
+                "timestep": 12,
+                "target_position": 5,
+                "relative_label": relative_label,
+                "actual_layer_index": layer,
+            }
+            for relative_label, layer in (("early", 5), ("middle", 14), ("late", 24))
+        ]
+    )
+    pos_rows = pd.DataFrame(
+        [
+            {
+                "sentence_id": "s0",
+                "word_index": 3,
+                "seed": 42,
+                "normalized_progress": 0.5,
+                "relative_label": "middle",
+                "feature_kind": feature_kind,
+            }
+            for feature_kind in ("residual", "head_0", "head_1")
+        ]
+    )
+
+    assert not final_token_rows.duplicated(
+        _observation_identity_columns(final_token_rows)
+    ).any()
+    assert not pos_rows.duplicated(_observation_identity_columns(pos_rows)).any()
 
 
 def test_validator_detects_infinite_metric_and_nonfinite_json(tmp_path):

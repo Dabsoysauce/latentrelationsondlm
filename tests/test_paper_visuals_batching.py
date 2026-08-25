@@ -5,11 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import torch
 from test_paper_optimizations import TinyTokenizer
 
-from dlmrel.experiments.paper_visuals import trajectory_chunk
+from dlmrel.experiments.paper_visuals import _numeric_attention_matrix, trajectory_chunk
 
 
 class _HeatmapModel:
@@ -104,3 +105,14 @@ def test_non_primary_seed_deduplicates_endpoints_the_same_way_batched_or_not():
     assert 0 not in set(unbatched["timestep"])
     assert 63 not in set(unbatched["timestep"])
     pd.testing.assert_frame_equal(unbatched, batched)
+
+
+def test_nested_arrow_object_array_restores_numeric_attention_matrix():
+    nested = np.empty(2, dtype=object)
+    nested[0] = np.array([0.1, 0.2], dtype=np.float32)
+    nested[1] = np.array([0.3, 0.4], dtype=np.float32)
+
+    restored = _numeric_attention_matrix(nested)
+
+    assert restored.dtype == np.float32
+    np.testing.assert_allclose(restored, [[0.1, 0.2], [0.3, 0.4]])
