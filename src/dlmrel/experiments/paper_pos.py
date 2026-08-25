@@ -7,6 +7,7 @@ import os
 import subprocess
 import tempfile
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -472,6 +473,18 @@ def _evaluate(fitted, train: pd.DataFrame, test: pd.DataFrame, *, seed: int):
     return evidence, metrics
 
 
+def _fit_evaluate_probe(
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    *,
+    seed: int,
+    regularization: float,
+):
+    """Fit one scientifically independent probe without touching shared state."""
+    fitted = _fit(train, seed=seed, regularization=regularization)
+    return _evaluate(fitted, train, test, seed=seed)
+
+
 def _extract(model, tokenizer, cfg: RunConfig, run_dir: Path) -> None:
     """Phase 1 (GPU): compute and checkpoint features for every role/seed/progress.
 
@@ -584,7 +597,6 @@ def _fit_and_evaluate(cfg: RunConfig, run_dir: Path, *, manifest_hashes: dict) -
     # key whose Phase 2 checkpoint is missing. Fitting thousands of
     # classifiers just to discover their evaluation was already checkpointed
     # would defeat the point of resuming an interrupted fit stage.
-    frozen: dict = {}
     selection_frames: dict = {}
     selection_sentences: set[str] = set()
     for seed in cfg.experiment.seeds:
@@ -600,40 +612,74 @@ def _fit_and_evaluate(cfg: RunConfig, run_dir: Path, *, manifest_hashes: dict) -
 
     evidence_frames, metric_rows = [], []
     test_sentences: set[str] = set()
-    for seed in cfg.experiment.seeds:
-        for progress in cfg.experiment.normalized_progress:
-            frame = checkpoint_store.require_stage(
-                ROLE_STAGE["test"], seed, progress, round(progress * 63)
-            )
-            test_sentences.update(frame["sentence_id"].astype(str))
-            for identity_values, group in frame.groupby(
-                ["relative_label", "feature_kind"], observed=True
-            ):
-                relative_label, feature_kind = identity_values
-                key = (seed, progress, relative_label, feature_kind)
-                cached = fit_store.load(seed, progress, relative_label, feature_kind)
-                if cached is not None:
-                    evidence, metrics = cached
-                else:
-                    if key not in frozen:
-                        frozen[key] = _fit(
-                            selection_frames[key], seed=seed, regularization=regularization
-                        )
-                    evidence, metrics = _evaluate(
-                        frozen[key], selection_frames[key], group, seed=seed
-                    )
-                    fit_store.store(seed, progress, relative_label, feature_kind, evidence, metrics)
-                evidence_frames.append(evidence)
-                metric_rows.append(
-                    {
-                        "seed": seed,
-                        "normalized_progress": progress,
-                        "mask_ratio": 1.0 - progress,
-                        "relative_label": relative_label,
-                        "feature_kind": feature_kind,
-                        **metrics,
-                    }
+    executor = (
+        ThreadPoolExecutor(max_workers=cfg.runtime.pos_fit_workers)
+        if cfg.runtime.pos_fit_workers > 1
+        else None
+    )
+    try:
+        for seed in cfg.experiment.seeds:
+            for progress in cfg.experiment.normalized_progress:
+                frame = checkpoint_store.require_stage(
+                    ROLE_STAGE["test"], seed, progress, round(progress * 63)
                 )
+                test_sentences.update(frame["sentence_id"].astype(str))
+                groups = list(
+                    frame.groupby(["relative_label", "feature_kind"], observed=True)
+                )
+                resolved: dict = {}
+                pending = []
+                for identity_values, group in groups:
+                    relative_label, feature_kind = identity_values
+                    key = (seed, progress, relative_label, feature_kind)
+                    cached = fit_store.load(seed, progress, relative_label, feature_kind)
+                    if cached is not None:
+                        resolved[key] = cached
+                        continue
+                    arguments = {
+                        "seed": seed,
+                        "regularization": regularization,
+                    }
+                    if executor is None:
+                        resolved[key] = _fit_evaluate_probe(
+                            selection_frames[key], group, **arguments
+                        )
+                        fit_store.store(*key, *resolved[key])
+                    else:
+                        pending.append(
+                            (
+                                key,
+                                executor.submit(
+                                    _fit_evaluate_probe,
+                                    selection_frames[key],
+                                    group,
+                                    **arguments,
+                                ),
+                            )
+                        )
+                # Resolve in canonical group order. Only the parent thread writes
+                # checkpoints, so atomic resume behavior is unchanged.
+                for key, future in pending:
+                    resolved[key] = future.result()
+                    fit_store.store(*key, *resolved[key])
+                for identity_values, _group in groups:
+                    relative_label, feature_kind = identity_values
+                    key = (seed, progress, relative_label, feature_kind)
+                    evidence, metrics = resolved[key]
+                    evidence_frames.append(evidence)
+                    metric_rows.append(
+                        {
+                            "seed": seed,
+                            "normalized_progress": progress,
+                            "mask_ratio": 1.0 - progress,
+                            "relative_label": relative_label,
+                            "feature_kind": feature_kind,
+                            **metrics,
+                        }
+                    )
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
     raw = pd.concat(evidence_frames, ignore_index=True)
     per_seed = pd.DataFrame(metric_rows)
     exclusions_path = run_dir / "extract_exclusions.parquet"

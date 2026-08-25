@@ -10,7 +10,7 @@ from test_paper_optimizations import ProjectionAdapter, TinyTokenizer, _example,
 
 from dlmrel.artifacts import atomic_json, canonical_hash
 from dlmrel.checkpoints import CheckpointIdentity, SentenceCheckpointStore
-from dlmrel.config import ExperimentConfig, RunConfig
+from dlmrel.config import ExperimentConfig, RunConfig, RuntimeConfig
 from dlmrel.experiments import paper_pos
 from dlmrel.paper_protocol import map_relative_depths
 
@@ -149,6 +149,47 @@ def test_all_stage_equals_extract_then_fit(tmp_path, monkeypatch):
     pd.testing.assert_frame_equal(all_metrics, split_metrics)
     assert all_details["selection_sentences"] == split_details["selection_sentences"]
     assert all_details["test_sentences"] == split_details["test_sentences"]
+
+
+def test_parallel_fit_is_exactly_equivalent_to_sequential_fit(tmp_path, monkeypatch):
+    _patch_pos_dependencies(monkeypatch)
+    manifest_hashes = {"select": "sha256:aaa", "test": "sha256:bbb"}
+    outputs = []
+    for name, workers in (("sequential", 1), ("parallel", 4)):
+        run_dir = _prepare_run_dir(tmp_path / name)
+        cfg = RunConfig(
+            experiment=_cfg().experiment,
+            runtime=RuntimeConfig(pos_fit_workers=workers),
+        )
+        paper_pos.run(ProjectionAdapter(), TinyTokenizer(), cfg, run_dir, pos_stage="extract")
+        paper_pos.run(
+            None,
+            None,
+            cfg,
+            run_dir,
+            pos_stage="fit",
+            manifest_hashes=manifest_hashes,
+        )
+        outputs.append(run_dir)
+
+    sequential, parallel = outputs
+    for filename in (
+        "instances.parquet",
+        "per_seed_metrics.csv",
+        "metrics.csv",
+        "pos_head_rankings.csv",
+    ):
+        left = (
+            pd.read_parquet(sequential / filename)
+            if filename.endswith(".parquet")
+            else pd.read_csv(sequential / filename)
+        )
+        right = (
+            pd.read_parquet(parallel / filename)
+            if filename.endswith(".parquet")
+            else pd.read_csv(parallel / filename)
+        )
+        pd.testing.assert_frame_equal(left, right, check_exact=True)
 
 
 def test_t0_reuses_seed_42_with_zero_extra_model_forwards(tmp_path, monkeypatch):

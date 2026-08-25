@@ -68,6 +68,7 @@ def resolve_run(args) -> RunConfig:
         intervention_batch_size=args.intervention_batch_size,
         sentence_batch_size=args.sentence_batch_size,
         adaptive_batch_max_size=args.adaptive_batch_max_size,
+        pos_fit_workers=args.pos_fit_workers,
         export_attention_cache=args.export_attention_cache,
         attention_cache=args.attention_cache,
         pos_stage=args.pos_stage,
@@ -421,6 +422,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=32,
         help="safe upper bound for successful timestep and sentence batch growth",
+    )
+    run.add_argument(
+        "--pos-fit-workers",
+        type=int,
+        default=1,
+        help=(
+            "POS fit stage only: number of independent head probes fitted in "
+            "parallel; each probe keeps the same data, solver, seed, and checkpoint"
+        ),
     )
     run.add_argument(
         "--export-attention-cache",
