@@ -244,6 +244,8 @@ def test_validator_distinguishes_native_token_and_depth_observations(tmp_path):
     native_rows["actual_layer_index"] = [6, 16]
     native_rows["target_position"] = [18, 19]
     native_rows["prediction_source_position"] = [17, 18]
+    for shard in (run / "checkpoints").glob("shard-*.json"):
+        shard.unlink()
     write_frames(run, raw=native_rows, exclusions=pd.DataFrame())
 
     summary = json.loads((run / "summary.json").read_text(encoding="utf-8"))
