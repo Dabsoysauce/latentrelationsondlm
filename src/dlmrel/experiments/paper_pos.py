@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from collections import Counter
@@ -308,9 +309,13 @@ class _FitCheckpointStore:
         manifest_hashes: dict,
         regularization: float,
         label_inventory: list[str],
+        mirror_directory: str | Path | None = None,
     ):
         self.directory = run_dir / "fit_checkpoints"
         self.directory.mkdir(parents=True, exist_ok=True)
+        self.mirror_directory = Path(mirror_directory) if mirror_directory else None
+        if self.mirror_directory is not None:
+            self.mirror_directory.mkdir(parents=True, exist_ok=True)
         self.scientific_config_hash = scientific_config_hash
         self.manifest_hashes = manifest_hashes
         self.regularization = regularization
@@ -336,6 +341,30 @@ class _FitCheckpointStore:
 
     def load(self, seed: int, progress: float, relative_label: str, feature_kind: str):
         path, meta_path = self._paths(seed, progress, relative_label, feature_kind)
+        cached = self._load_paths(
+            path, meta_path, seed, progress, relative_label, feature_kind
+        )
+        if cached is not None or self.mirror_directory is None:
+            return cached
+        mirror_path = self.mirror_directory / path.name
+        return self._load_paths(
+            mirror_path,
+            mirror_path.with_suffix(".meta.json"),
+            seed,
+            progress,
+            relative_label,
+            feature_kind,
+        )
+
+    def _load_paths(
+        self,
+        path: Path,
+        meta_path: Path,
+        seed: int,
+        progress: float,
+        relative_label: str,
+        feature_kind: str,
+    ):
         if not path.exists() or not meta_path.exists():
             return None
         try:
@@ -375,6 +404,18 @@ class _FitCheckpointStore:
                 "metrics": metrics,
             },
         )
+        if self.mirror_directory is not None:
+            mirror_path = self.mirror_directory / path.name
+            mirror_temporary = mirror_path.with_suffix(
+                mirror_path.suffix + f".tmp-{os.getpid()}"
+            )
+            mirror_temporary.unlink(missing_ok=True)
+            shutil.copyfile(path, mirror_temporary)
+            os.replace(mirror_temporary, mirror_path)
+            atomic_json(
+                mirror_path.with_suffix(".meta.json"),
+                json.loads(meta_path.read_text(encoding="utf-8")),
+            )
 
 
 def _reuse_t0_from_seed42(
@@ -429,27 +470,29 @@ def _fit(frame: pd.DataFrame, *, seed: int, regularization: float):
     if len(set(y)) < 2:
         raise ValueError("POS selection features contain fewer than two classes")
     scaler = StandardScaler().fit(x)
+    scaled_x = scaler.transform(x)
     classifier = LogisticRegression(
         C=regularization, max_iter=2000, random_state=seed
-    ).fit(scaler.transform(x), y)
-    return scaler, classifier, x, y
+    ).fit(scaled_x, y)
+    return scaler, classifier, x, scaled_x, y
 
 
 def _evaluate(fitted, train: pd.DataFrame, test: pd.DataFrame, *, seed: int):
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import accuracy_score, f1_score
 
-    scaler, classifier, train_x, train_y = fitted
+    scaler, classifier, train_x, scaled_train_x, train_y = fitted
     test_x = np.stack(test["feature"].map(np.asarray))
+    scaled_test_x = scaler.transform(test_x)
     test_y = test["label"].to_numpy()
-    prediction = classifier.predict(scaler.transform(test_x))
+    prediction = classifier.predict(scaled_test_x)
     majority = Counter(train_y).most_common(1)[0][0]
     rng = np.random.default_rng(seed)
     shuffled_y = train_y.copy()
     rng.shuffle(shuffled_y)
     shuffled = LogisticRegression(
         C=classifier.C, max_iter=2000, random_state=seed
-    ).fit(scaler.transform(train_x), shuffled_y).predict(scaler.transform(test_x))
+    ).fit(scaled_train_x, shuffled_y).predict(scaled_test_x)
     random_train = rng.normal(size=train_x.shape)
     random_test = rng.normal(size=test_x.shape)
     random_feature = LogisticRegression(
@@ -555,85 +598,249 @@ def _extract(model, tokenizer, cfg: RunConfig, run_dir: Path) -> None:
                 )
 
 
-def _fit_and_evaluate(cfg: RunConfig, run_dir: Path, *, manifest_hashes: dict) -> dict[str, Any]:
-    """Phase 2 (CPU): fit and evaluate every probe from already-extracted features.
-
-    Loads only checkpointed feature parquet files -- no model, no tokenizer,
-    no GPU. Fails closed if a required feature checkpoint is missing.
-    """
+def _fit_store(
+    cfg: RunConfig,
+    run_dir: Path,
+    *,
+    manifest_hashes: dict,
+    mirror_directory: str | Path | None = None,
+) -> tuple[_FitCheckpointStore, float, list[str]]:
     settings = cfg.experiment.settings
-    depths = pd.read_csv(run_dir / "relative_depth_mapping.csv").to_dict("records")
-    tagger_identity = json.loads((run_dir / "tagger_identity.json").read_text(encoding="utf-8"))
     scientific_config_hash = json.loads(
         (run_dir / "run_metadata.json").read_text(encoding="utf-8")
     ).get("scientific_config_hash")
     regularization = float(settings["fixed_regularization_c"])
     label_inventory = list(LABELS)
-    fit_store = _FitCheckpointStore(
-        run_dir,
-        scientific_config_hash=scientific_config_hash,
-        manifest_hashes=manifest_hashes,
-        regularization=regularization,
-        label_inventory=label_inventory,
+    return (
+        _FitCheckpointStore(
+            run_dir,
+            scientific_config_hash=scientific_config_hash,
+            manifest_hashes=manifest_hashes,
+            regularization=regularization,
+            label_inventory=label_inventory,
+            mirror_directory=mirror_directory,
+        ),
+        regularization,
+        label_inventory,
     )
-    checkpoint_store = SentenceCheckpointStore(run_dir)
 
-    # Selection frames are organized eagerly (cheap: no sklearn fit happens
-    # here), but the actual classifier fit is deferred into the test loop
-    # below and only run for a (seed, progress, relative_label, feature_kind)
-    # key whose Phase 2 checkpoint is missing. Fitting thousands of
-    # classifiers just to discover their evaluation was already checkpointed
-    # would defeat the point of resuming an interrupted fit stage.
-    frozen: dict = {}
-    selection_frames: dict = {}
-    selection_sentences: set[str] = set()
+
+def _probe_keys(cfg: RunConfig, checkpoint_store: SentenceCheckpointStore) -> list[tuple]:
+    """Return all logical probes in a stable order shared by every worker."""
+    keys = []
     for seed in cfg.experiment.seeds:
         for progress in cfg.experiment.normalized_progress:
             frame = checkpoint_store.require_stage(
-                ROLE_STAGE["select"], seed, progress, round(progress * 63)
+                ROLE_STAGE["test"],
+                seed,
+                progress,
+                round(progress * 63),
+                columns=["relative_label", "feature_kind"],
             )
-            selection_sentences.update(frame["sentence_id"].astype(str))
-            for identity_values, group in frame.groupby(
-                ["relative_label", "feature_kind"], observed=True
-            ):
-                selection_frames[(seed, progress, *identity_values)] = group
+            identities = frame[["relative_label", "feature_kind"]].drop_duplicates()
+            keys.extend(
+                (seed, progress, str(row.relative_label), str(row.feature_kind))
+                for row in identities.itertuples(index=False)
+            )
+    return sorted(keys)
 
-    evidence_frames, metric_rows = [], []
+
+def _assigned_probe_keys(
+    keys: list[tuple], *, shard_count: int, shard_index: int
+) -> list[tuple]:
+    """Balance logical probes while keeping equivalent t=0 main fits together."""
+    units: dict[tuple, list[tuple]] = {}
+    for key in keys:
+        seed, progress, relative_label, feature_kind = key
+        unit = (
+            ("shared-t0", relative_label, feature_kind)
+            if progress == 0.0
+            else ("seeded", seed, progress, relative_label, feature_kind)
+        )
+        units.setdefault(unit, []).append(key)
+    buckets: list[list[tuple]] = [[] for _ in range(shard_count)]
+    for unit in sorted(units):
+        target = min(range(shard_count), key=lambda index: (len(buckets[index]), index))
+        buckets[target].extend(sorted(units[unit]))
+    return sorted(buckets[shard_index])
+
+
+def _fit_shard(
+    cfg: RunConfig,
+    run_dir: Path,
+    *,
+    manifest_hashes: dict,
+    shard_count: int,
+    shard_index: int,
+    mirror_directory: str | Path | None,
+) -> dict[str, Any]:
+    """Fit one deterministic subset while keeping only one feature pair in memory."""
+    fit_store, regularization, _label_inventory = _fit_store(
+        cfg,
+        run_dir,
+        manifest_hashes=manifest_hashes,
+        mirror_directory=mirror_directory,
+    )
+    checkpoint_store = SentenceCheckpointStore(run_dir)
+    all_keys = _probe_keys(cfg, checkpoint_store)
+    assigned_keys = _assigned_probe_keys(
+        all_keys, shard_count=shard_count, shard_index=shard_index
+    )
+    completed = reused = fitted_now = reused_main_fits = 0
+    main_fit_cache: dict[tuple, Any] = {}
+
+    for seed in cfg.experiment.seeds:
+        for progress in cfg.experiment.normalized_progress:
+            pair_keys = [key for key in assigned_keys if key[:2] == (seed, progress)]
+            if not pair_keys:
+                continue
+            filters = [
+                [
+                    ("relative_label", "==", relative_label),
+                    ("feature_kind", "==", feature_kind),
+                ]
+                for _seed, _progress, relative_label, feature_kind in pair_keys
+            ]
+            selection = checkpoint_store.require_stage(
+                ROLE_STAGE["select"],
+                seed,
+                progress,
+                round(progress * 63),
+                filters=filters,
+            )
+            test = checkpoint_store.require_stage(
+                ROLE_STAGE["test"],
+                seed,
+                progress,
+                round(progress * 63),
+                filters=filters,
+            )
+            selection_groups = {
+                tuple(map(str, identity)): group
+                for identity, group in selection.groupby(
+                    ["relative_label", "feature_kind"], observed=True
+                )
+            }
+            test_groups = {
+                tuple(map(str, identity)): group
+                for identity, group in test.groupby(
+                    ["relative_label", "feature_kind"], observed=True
+                )
+            }
+            for key in pair_keys:
+                relative_label, feature_kind = key[2:]
+                identity = (relative_label, feature_kind)
+                if identity not in selection_groups or identity not in test_groups:
+                    raise ArtifactError(f"feature checkpoints do not contain logical probe {key}")
+                cached = fit_store.load(*key)
+                if cached is None:
+                    main_key = (progress, relative_label, feature_kind)
+                    fitted = main_fit_cache.get(main_key) if progress == 0.0 else None
+                    if fitted is None:
+                        fitted = _fit(
+                            selection_groups[identity], seed=seed, regularization=regularization
+                        )
+                        if progress == 0.0 and fitted[1].solver == "lbfgs":
+                            main_fit_cache[main_key] = fitted
+                    else:
+                        reused_main_fits += 1
+                    evidence, metrics = _evaluate(
+                        fitted, selection_groups[identity], test_groups[identity], seed=seed
+                    )
+                    fit_store.store(*key, evidence, metrics)
+                    fitted_now += 1
+                else:
+                    reused += 1
+                completed += 1
+
+    if completed != len(assigned_keys):
+        raise ArtifactError(
+            f"POS fit shard {shard_index}/{shard_count} completed {completed} of "
+            f"{len(assigned_keys)} assigned probes"
+        )
+    status = {
+        "schema_version": "dlmrel-pos-fit-shard-v1",
+        "pos_fit_partial": shard_count > 1,
+        "shard_count": shard_count,
+        "shard_index": shard_index,
+        "total_logical_probes": len(all_keys),
+        "assigned_logical_probes": len(assigned_keys),
+        "completed_logical_probes": completed,
+        "reused_logical_probes": reused,
+        "fitted_logical_probes": fitted_now,
+        "reused_t0_main_fits": reused_main_fits,
+    }
+    atomic_json(
+        run_dir / f"pos_fit_shard_status-{shard_index:03d}-of-{shard_count:03d}.json",
+        status,
+    )
+    return status
+
+
+def _aggregate_fit_checkpoints(
+    cfg: RunConfig,
+    run_dir: Path,
+    *,
+    manifest_hashes: dict,
+    mirror_directory: str | Path | None = None,
+) -> dict[str, Any]:
+    """Validate every logical probe checkpoint, then write final artifacts."""
+    settings = cfg.experiment.settings
+    depths = pd.read_csv(run_dir / "relative_depth_mapping.csv").to_dict("records")
+    tagger_identity = json.loads((run_dir / "tagger_identity.json").read_text(encoding="utf-8"))
+    fit_store, regularization, label_inventory = _fit_store(
+        cfg,
+        run_dir,
+        manifest_hashes=manifest_hashes,
+        mirror_directory=mirror_directory,
+    )
+    checkpoint_store = SentenceCheckpointStore(run_dir)
+    keys = _probe_keys(cfg, checkpoint_store)
+    evidence_frames, metric_rows, missing = [], [], []
+    for seed, progress, relative_label, feature_kind in keys:
+        cached = fit_store.load(seed, progress, relative_label, feature_kind)
+        if cached is None:
+            missing.append((seed, progress, relative_label, feature_kind))
+            continue
+        evidence, metrics = cached
+        evidence_frames.append(evidence)
+        metric_rows.append(
+            {
+                "seed": seed,
+                "normalized_progress": progress,
+                "mask_ratio": 1.0 - progress,
+                "relative_label": relative_label,
+                "feature_kind": feature_kind,
+                **metrics,
+            }
+        )
+    if missing:
+        preview = ", ".join(map(str, missing[:3]))
+        raise ArtifactError(
+            f"cannot aggregate POS fit: {len(missing)} of {len(keys)} logical-probe "
+            f"checkpoints are missing or invalid; first missing: {preview}"
+        )
+
+    selection_sentences: set[str] = set()
     test_sentences: set[str] = set()
     for seed in cfg.experiment.seeds:
         for progress in cfg.experiment.normalized_progress:
-            frame = checkpoint_store.require_stage(
-                ROLE_STAGE["test"], seed, progress, round(progress * 63)
+            selection = checkpoint_store.require_stage(
+                ROLE_STAGE["select"],
+                seed,
+                progress,
+                round(progress * 63),
+                columns=["sentence_id"],
             )
-            test_sentences.update(frame["sentence_id"].astype(str))
-            for identity_values, group in frame.groupby(
-                ["relative_label", "feature_kind"], observed=True
-            ):
-                relative_label, feature_kind = identity_values
-                key = (seed, progress, relative_label, feature_kind)
-                cached = fit_store.load(seed, progress, relative_label, feature_kind)
-                if cached is not None:
-                    evidence, metrics = cached
-                else:
-                    if key not in frozen:
-                        frozen[key] = _fit(
-                            selection_frames[key], seed=seed, regularization=regularization
-                        )
-                    evidence, metrics = _evaluate(
-                        frozen[key], selection_frames[key], group, seed=seed
-                    )
-                    fit_store.store(seed, progress, relative_label, feature_kind, evidence, metrics)
-                evidence_frames.append(evidence)
-                metric_rows.append(
-                    {
-                        "seed": seed,
-                        "normalized_progress": progress,
-                        "mask_ratio": 1.0 - progress,
-                        "relative_label": relative_label,
-                        "feature_kind": feature_kind,
-                        **metrics,
-                    }
-                )
+            test = checkpoint_store.require_stage(
+                ROLE_STAGE["test"],
+                seed,
+                progress,
+                round(progress * 63),
+                columns=["sentence_id"],
+            )
+            selection_sentences.update(selection["sentence_id"].astype(str))
+            test_sentences.update(test["sentence_id"].astype(str))
     raw = pd.concat(evidence_frames, ignore_index=True)
     per_seed = pd.DataFrame(metric_rows)
     exclusions_path = run_dir / "extract_exclusions.parquet"
@@ -677,6 +884,48 @@ def _fit_and_evaluate(cfg: RunConfig, run_dir: Path, *, manifest_hashes: dict) -
         "head_level_probes": True,
         "selection_sentences": len(selection_sentences),
         "test_sentences": len(test_sentences),
+        "logical_probes": len(keys),
+    }
+
+
+def _fit_and_evaluate(
+    cfg: RunConfig,
+    run_dir: Path,
+    *,
+    manifest_hashes: dict,
+    shard_count: int,
+    shard_index: int,
+    aggregate_only: bool,
+    mirror_directory: str | Path | None,
+) -> dict[str, Any]:
+    """Phase 2 (CPU): fit a shard or aggregate completed probe checkpoints."""
+    if shard_count < 1 or not 0 <= shard_index < shard_count:
+        raise ValueError("fit shard index must be within a positive shard count")
+    if aggregate_only:
+        return _aggregate_fit_checkpoints(
+            cfg,
+            run_dir,
+            manifest_hashes=manifest_hashes,
+            mirror_directory=mirror_directory,
+        )
+    status = _fit_shard(
+        cfg,
+        run_dir,
+        manifest_hashes=manifest_hashes,
+        shard_count=shard_count,
+        shard_index=shard_index,
+        mirror_directory=mirror_directory,
+    )
+    if shard_count > 1:
+        return status
+    return {
+        **status,
+        **_aggregate_fit_checkpoints(
+            cfg,
+            run_dir,
+            manifest_hashes=manifest_hashes,
+            mirror_directory=mirror_directory,
+        ),
     }
 
 
@@ -687,6 +936,10 @@ def run(
     run_dir: Path,
     *,
     pos_stage: str = "all",
+    fit_shard_count: int = 1,
+    fit_shard_index: int = 0,
+    fit_aggregate_only: bool = False,
+    fit_checkpoint_mirror: str | Path | None = None,
     manifest_hashes: dict | None = None,
     **_unused: Any,
 ) -> dict[str, Any]:
@@ -704,6 +957,28 @@ def run(
         _extract(model, tokenizer, cfg, run_dir)
         return {"pos_stage": "extract", "extract_complete": True}
     if pos_stage == "fit":
-        return {"pos_stage": "fit", **_fit_and_evaluate(cfg, run_dir, manifest_hashes=manifest_hashes)}
+        return {
+            "pos_stage": "fit",
+            **_fit_and_evaluate(
+                cfg,
+                run_dir,
+                manifest_hashes=manifest_hashes,
+                shard_count=fit_shard_count,
+                shard_index=fit_shard_index,
+                aggregate_only=fit_aggregate_only,
+                mirror_directory=fit_checkpoint_mirror,
+            ),
+        }
     _extract(model, tokenizer, cfg, run_dir)
-    return {"pos_stage": "all", **_fit_and_evaluate(cfg, run_dir, manifest_hashes=manifest_hashes)}
+    return {
+        "pos_stage": "all",
+        **_fit_and_evaluate(
+            cfg,
+            run_dir,
+            manifest_hashes=manifest_hashes,
+            shard_count=1,
+            shard_index=0,
+            aggregate_only=False,
+            mirror_directory=None,
+        ),
+    }

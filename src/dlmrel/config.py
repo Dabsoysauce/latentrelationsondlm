@@ -233,6 +233,10 @@ class RuntimeConfig:
     export_attention_cache: bool = False
     attention_cache: str | None = None
     pos_stage: str = "all"
+    pos_fit_shard_count: int = 1
+    pos_fit_shard_index: int = 0
+    pos_fit_aggregate_only: bool = False
+    pos_fit_checkpoint_mirror: str | None = None
 
 
 @dataclass(frozen=True)
@@ -276,6 +280,22 @@ class RunConfig:
             raise ConfigError("pos_stage must be extract, fit, or all")
         if self.runtime.pos_stage != "all" and self.experiment.type != "pos_token_class_linear_probes":
             raise ConfigError("pos_stage is only meaningful for pos_token_class_linear_probes")
+        if self.runtime.pos_fit_shard_count < 1:
+            raise ConfigError("pos_fit_shard_count must be positive")
+        if not 0 <= self.runtime.pos_fit_shard_index < self.runtime.pos_fit_shard_count:
+            raise ConfigError("pos_fit_shard_index must be in [0, pos_fit_shard_count)")
+        pos_fit_parallel = (
+            self.runtime.pos_fit_shard_count != 1
+            or self.runtime.pos_fit_shard_index != 0
+            or self.runtime.pos_fit_aggregate_only
+            or self.runtime.pos_fit_checkpoint_mirror is not None
+        )
+        if pos_fit_parallel and self.experiment.type != "pos_token_class_linear_probes":
+            raise ConfigError("POS fit sharding is only valid for pos_token_class_linear_probes")
+        if pos_fit_parallel and self.runtime.pos_stage != "fit":
+            raise ConfigError("POS fit sharding requires pos_stage=fit")
+        if pos_fit_parallel and not self.runtime.resume:
+            raise ConfigError("POS fit sharding requires resume=True for an extracted run")
         if self.track == "confirmatory_ewt" and self.dataset.id != "ewt":
             raise ConfigError("confirmatory_ewt track requires the EWT dataset")
         if self.track == "external_treebank_transfer" and self.dataset.id == "ewt":

@@ -227,6 +227,10 @@ def run_real(cfg: RunConfig, run_dir: Path, manifest_hashes: dict[str, str]) -> 
             cfg,
             run_dir,
             pos_stage=cfg.runtime.pos_stage,
+            fit_shard_count=cfg.runtime.pos_fit_shard_count,
+            fit_shard_index=cfg.runtime.pos_fit_shard_index,
+            fit_aggregate_only=cfg.runtime.pos_fit_aggregate_only,
+            fit_checkpoint_mirror=cfg.runtime.pos_fit_checkpoint_mirror,
             manifest_hashes=manifest_hashes,
         )
     elif cfg.experiment.type == "final_token_prediction_by_layer":
@@ -316,6 +320,11 @@ def run_real(cfg: RunConfig, run_dir: Path, manifest_hashes: dict[str, str]) -> 
         metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
         metadata["last_resumed_at"] = datetime.now(timezone.utc).isoformat()
         atomic_json(run_dir / "run_metadata.json", metadata)
+        return
+
+    if details.get("pos_fit_partial"):
+        # Parallel fit workers only produce identity-checked checkpoints. The
+        # aggregate-only pass is solely responsible for final run artifacts.
         return
 
     atomic_json(

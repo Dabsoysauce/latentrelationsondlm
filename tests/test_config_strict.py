@@ -4,7 +4,7 @@ import pytest
 import yaml
 
 from dlmrel.artifacts import canonical_hash
-from dlmrel.config import ConfigError, RunConfig
+from dlmrel.config import ConfigError, RunConfig, RuntimeConfig
 
 ROOT = Path(__file__).parents[1]
 
@@ -167,4 +167,43 @@ def test_capability_mismatch_fails_before_model_loading(tmp_path):
             path,
             ROOT / "configs/datasets/ewt.yaml",
             ROOT / "configs/experiments/head_search.yaml",
+        )
+
+
+def test_pos_fit_parallel_runtime_is_execution_only_and_requires_resume():
+    runtime = RuntimeConfig(
+        resume=True,
+        pos_stage="fit",
+        pos_fit_shard_count=6,
+        pos_fit_shard_index=5,
+    )
+    cfg = RunConfig.load_files(
+        ROOT / "configs/models/fake.yaml",
+        ROOT / "configs/datasets/ewt.yaml",
+        ROOT / "configs/experiments/pos_token_class_linear_probes.yaml",
+        runtime=runtime,
+    )
+    assert cfg.runtime.pos_fit_shard_count == 6
+
+    with pytest.raises(ConfigError, match="requires resume=True"):
+        RunConfig.load_files(
+            ROOT / "configs/models/fake.yaml",
+            ROOT / "configs/datasets/ewt.yaml",
+            ROOT / "configs/experiments/pos_token_class_linear_probes.yaml",
+            runtime=RuntimeConfig(pos_stage="fit", pos_fit_shard_count=6),
+        )
+
+
+def test_pos_fit_parallel_runtime_rejects_out_of_range_shard():
+    with pytest.raises(ConfigError, match="pos_fit_shard_index"):
+        RunConfig.load_files(
+            ROOT / "configs/models/fake.yaml",
+            ROOT / "configs/datasets/ewt.yaml",
+            ROOT / "configs/experiments/pos_token_class_linear_probes.yaml",
+            runtime=RuntimeConfig(
+                resume=True,
+                pos_stage="fit",
+                pos_fit_shard_count=6,
+                pos_fit_shard_index=6,
+            ),
         )

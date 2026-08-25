@@ -276,3 +276,235 @@ def test_interrupted_phase2_resumes_only_missing_logical_probes(tmp_path, monkey
     )
     assert (42, 0.0, relative_label, feature_kind) not in seen, "a completed logical probe was refit"
     assert len(seen) > 0, "the remaining incomplete probes should still have been fit"
+
+
+def test_two_fit_shards_then_aggregate_equals_serial_fit(tmp_path, monkeypatch):
+    manifests = {"select": "sha256:aaa", "test": "sha256:bbb"}
+    _patch_pos_dependencies(monkeypatch)
+
+    serial_dir = _prepare_run_dir(tmp_path / "serial")
+    paper_pos.run(ProjectionAdapter(), TinyTokenizer(), _cfg(), serial_dir, pos_stage="extract")
+    paper_pos.run(
+        None, None, _cfg(), serial_dir, pos_stage="fit", manifest_hashes=manifests
+    )
+
+    sharded_dir = _prepare_run_dir(tmp_path / "sharded")
+    paper_pos.run(ProjectionAdapter(), TinyTokenizer(), _cfg(), sharded_dir, pos_stage="extract")
+    first = paper_pos.run(
+        None,
+        None,
+        _cfg(),
+        sharded_dir,
+        pos_stage="fit",
+        fit_shard_count=2,
+        fit_shard_index=0,
+        manifest_hashes=manifests,
+    )
+    second = paper_pos.run(
+        None,
+        None,
+        _cfg(),
+        sharded_dir,
+        pos_stage="fit",
+        fit_shard_count=2,
+        fit_shard_index=1,
+        manifest_hashes=manifests,
+    )
+    assert first["pos_fit_partial"] and second["pos_fit_partial"]
+    assert first["assigned_logical_probes"] + second["assigned_logical_probes"] == first[
+        "total_logical_probes"
+    ]
+    assert not (sharded_dir / "metrics.csv").exists()
+
+    details = paper_pos.run(
+        None,
+        None,
+        _cfg(),
+        sharded_dir,
+        pos_stage="fit",
+        fit_aggregate_only=True,
+        manifest_hashes=manifests,
+    )
+    assert details["logical_probes"] == first["total_logical_probes"]
+    pd.testing.assert_frame_equal(
+        pd.read_csv(serial_dir / "metrics.csv"),
+        pd.read_csv(sharded_dir / "metrics.csv"),
+    )
+    assert {
+        path.name for path in (serial_dir / "fit_checkpoints").glob("*.parquet")
+    } == {path.name for path in (sharded_dir / "fit_checkpoints").glob("*.parquet")}
+
+
+def test_aggregate_fails_closed_until_every_fit_shard_finishes(tmp_path, monkeypatch):
+    run_dir = _prepare_run_dir(tmp_path)
+    manifests = {"select": "sha256:aaa", "test": "sha256:bbb"}
+    _patch_pos_dependencies(monkeypatch)
+    paper_pos.run(ProjectionAdapter(), TinyTokenizer(), _cfg(), run_dir, pos_stage="extract")
+    paper_pos.run(
+        None,
+        None,
+        _cfg(),
+        run_dir,
+        pos_stage="fit",
+        fit_shard_count=2,
+        fit_shard_index=0,
+        manifest_hashes=manifests,
+    )
+
+    with pytest.raises(Exception, match="cannot aggregate POS fit"):
+        paper_pos.run(
+            None,
+            None,
+            _cfg(),
+            run_dir,
+            pos_stage="fit",
+            fit_aggregate_only=True,
+            manifest_hashes=manifests,
+        )
+    assert not (run_dir / "metrics.csv").exists()
+
+
+def test_completed_fit_shard_is_reused_without_refitting(tmp_path, monkeypatch):
+    run_dir = _prepare_run_dir(tmp_path)
+    manifests = {"select": "sha256:aaa", "test": "sha256:bbb"}
+    _patch_pos_dependencies(monkeypatch)
+    paper_pos.run(ProjectionAdapter(), TinyTokenizer(), _cfg(), run_dir, pos_stage="extract")
+    paper_pos.run(
+        None,
+        None,
+        _cfg(),
+        run_dir,
+        pos_stage="fit",
+        fit_shard_count=2,
+        fit_shard_index=0,
+        manifest_hashes=manifests,
+    )
+
+    monkeypatch.setattr(paper_pos, "_fit", lambda *args, **kwargs: pytest.fail("refit"))
+    details = paper_pos.run(
+        None,
+        None,
+        _cfg(),
+        run_dir,
+        pos_stage="fit",
+        fit_shard_count=2,
+        fit_shard_index=0,
+        manifest_hashes=manifests,
+    )
+    assert details["fitted_logical_probes"] == 0
+    assert details["reused_logical_probes"] == details["assigned_logical_probes"]
+
+
+def test_scaler_transforms_train_and_test_once_per_probe(tmp_path, monkeypatch):
+    from sklearn.preprocessing import StandardScaler
+
+    run_dir = _prepare_run_dir(tmp_path)
+    _patch_pos_dependencies(monkeypatch)
+    paper_pos.run(ProjectionAdapter(), TinyTokenizer(), _cfg(), run_dir, pos_stage="extract")
+    store = SentenceCheckpointStore(run_dir)
+    selection = store.require_stage("paper-pos-selection-features", 42, 0.0, 0)
+    test = store.require_stage("paper-pos-test-features", 42, 0.0, 0)
+    identity = next(
+        iter(selection[["relative_label", "feature_kind"]].drop_duplicates().itertuples(index=False))
+    )
+    selection = selection[
+        (selection["relative_label"] == identity.relative_label)
+        & (selection["feature_kind"] == identity.feature_kind)
+    ]
+    test = test[
+        (test["relative_label"] == identity.relative_label)
+        & (test["feature_kind"] == identity.feature_kind)
+    ]
+    calls = []
+    real_transform = StandardScaler.transform
+
+    def counting_transform(self, values, *args, **kwargs):
+        calls.append(len(values))
+        return real_transform(self, values, *args, **kwargs)
+
+    monkeypatch.setattr(StandardScaler, "transform", counting_transform)
+    fitted = paper_pos._fit(selection, seed=42, regularization=1.0)
+    paper_pos._evaluate(fitted, selection, test, seed=42)
+    assert calls == [len(selection), len(test)]
+
+
+def test_t0_main_fit_reuse_matches_independent_seed_fit(tmp_path, monkeypatch):
+    run_dir = _prepare_run_dir(tmp_path)
+    manifests = {"select": "sha256:aaa", "test": "sha256:bbb"}
+    _patch_pos_dependencies(monkeypatch)
+    paper_pos.run(ProjectionAdapter(), TinyTokenizer(), _cfg(), run_dir, pos_stage="extract")
+    details = paper_pos.run(
+        None, None, _cfg(), run_dir, pos_stage="fit", manifest_hashes=manifests
+    )
+    assert details["reused_t0_main_fits"] > 0
+
+    store = SentenceCheckpointStore(run_dir)
+    selection = store.require_stage("paper-pos-selection-features", 43, 0.0, 0)
+    test = store.require_stage("paper-pos-test-features", 43, 0.0, 0)
+    identity = next(
+        iter(selection[["relative_label", "feature_kind"]].drop_duplicates().itertuples(index=False))
+    )
+    selection = selection[
+        (selection["relative_label"] == identity.relative_label)
+        & (selection["feature_kind"] == identity.feature_kind)
+    ]
+    test = test[
+        (test["relative_label"] == identity.relative_label)
+        & (test["feature_kind"] == identity.feature_kind)
+    ]
+    independent = paper_pos._fit(selection, seed=43, regularization=1.0)
+    expected_evidence, expected_metrics = paper_pos._evaluate(
+        independent, selection, test, seed=43
+    )
+    fit_store = paper_pos._FitCheckpointStore(
+        run_dir,
+        scientific_config_hash="sha256:frozen-pos-config",
+        manifest_hashes=manifests,
+        regularization=1.0,
+        label_inventory=list(paper_pos.LABELS),
+    )
+    actual_evidence, actual_metrics = fit_store.load(
+        43, 0.0, identity.relative_label, identity.feature_kind
+    )
+    pd.testing.assert_frame_equal(
+        actual_evidence.reset_index(drop=True), expected_evidence.reset_index(drop=True)
+    )
+    assert actual_metrics == expected_metrics
+
+
+def test_fit_checkpoint_mirror_is_atomic_and_resumable(tmp_path, monkeypatch):
+    run_dir = _prepare_run_dir(tmp_path / "local")
+    mirror_dir = tmp_path / "shared" / "fit_checkpoints"
+    manifests = {"select": "sha256:aaa", "test": "sha256:bbb"}
+    _patch_pos_dependencies(monkeypatch)
+    paper_pos.run(ProjectionAdapter(), TinyTokenizer(), _cfg(), run_dir, pos_stage="extract")
+    first = paper_pos.run(
+        None,
+        None,
+        _cfg(),
+        run_dir,
+        pos_stage="fit",
+        fit_shard_count=2,
+        fit_shard_index=0,
+        fit_checkpoint_mirror=mirror_dir,
+        manifest_hashes=manifests,
+    )
+    assert len(list(mirror_dir.glob("*.parquet"))) == first["fitted_logical_probes"]
+    assert not list(mirror_dir.glob("*.tmp*"))
+
+    local_checkpoint = next((run_dir / "fit_checkpoints").glob("*.parquet"))
+    local_checkpoint.with_suffix(".meta.json").unlink()
+    local_checkpoint.unlink()
+    monkeypatch.setattr(paper_pos, "_fit", lambda *args, **kwargs: pytest.fail("refit"))
+    resumed = paper_pos.run(
+        None,
+        None,
+        _cfg(),
+        run_dir,
+        pos_stage="fit",
+        fit_shard_count=2,
+        fit_shard_index=0,
+        fit_checkpoint_mirror=mirror_dir,
+        manifest_hashes=manifests,
+    )
+    assert resumed["fitted_logical_probes"] == 0
