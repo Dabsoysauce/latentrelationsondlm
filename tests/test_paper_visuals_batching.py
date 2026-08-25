@@ -5,11 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import torch
 from test_paper_optimizations import TinyTokenizer
 
-from dlmrel.experiments.paper_visuals import trajectory_chunk
+from dlmrel.experiments.paper_visuals import _numeric_attention_matrix, trajectory_chunk
 
 
 class _HeatmapModel:
@@ -32,6 +33,17 @@ class _HeatmapModel:
             torch.softmax(base + offsets + layer, dim=-1) for layer in range(self.layers)
         )
         return attentions
+
+
+def test_nested_parquet_object_attention_restores_exact_numeric_matrix():
+    expected = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float64)
+    parquet_value = np.empty(2, dtype=object)
+    parquet_value[:] = [row.astype(object) for row in expected]
+
+    actual = _numeric_attention_matrix(parquet_value)
+
+    assert actual.dtype == np.float64
+    np.testing.assert_array_equal(actual, expected)
 
 
 @dataclass

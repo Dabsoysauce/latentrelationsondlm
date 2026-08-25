@@ -8,9 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import torch
 
+from ..artifacts import ArtifactError
 from ..checkpoints import CheckpointIdentity, SentenceCheckpointStore
 from ..config import RELATION_NAMES, RunConfig
 from ..data import load_manifest_examples
@@ -213,7 +215,7 @@ def plot_saved_evidence(run_dir: str | Path) -> list[str]:
         path = figure_dir / f"{relation}__seed-{seed}__trajectory.pdf"
         with PdfPages(path) as pdf:
             for row in group.sort_values("timestep").itertuples(index=False):
-                matrix = torch.tensor(row.attention).numpy()
+                matrix = _numeric_attention_matrix(row.attention)
                 figure, axis = plt.subplots(figsize=(9, 8))
                 image = axis.imshow(matrix, cmap="viridis", aspect="auto")
                 axis.set_title(
@@ -242,7 +244,11 @@ def plot_saved_evidence(run_dir: str | Path) -> list[str]:
                 rows = math.ceil(len(heads) / columns)
                 figure, axes = plt.subplots(rows, columns, figsize=(12, 3 * rows), squeeze=False)
                 for axis, head_row in zip(axes.flat, heads, strict=False):
-                    axis.imshow(head_row.attention, cmap="viridis", aspect="auto")
+                    axis.imshow(
+                        _numeric_attention_matrix(head_row.attention),
+                        cmap="viridis",
+                        aspect="auto",
+                    )
                     axis.set_title(f"L{layer}H{head_row.head}")
                     axis.set_xticks([])
                     axis.set_yticks([])
@@ -254,6 +260,16 @@ def plot_saved_evidence(run_dir: str | Path) -> list[str]:
                 plt.close(figure)
         outputs.append(str(path))
     return outputs
+
+
+def _numeric_attention_matrix(value) -> np.ndarray:
+    """Restore a numeric matrix from parquet's nested object-array representation."""
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    matrix = np.asarray(value, dtype=np.float64)
+    if matrix.ndim != 2:
+        raise ArtifactError("saved attention evidence is not a matrix")
+    return matrix
 
 
 def run(
