@@ -432,27 +432,29 @@ def _fit(frame: pd.DataFrame, *, seed: int, regularization: float):
     if len(set(y)) < 2:
         raise ValueError("POS selection features contain fewer than two classes")
     scaler = StandardScaler().fit(x)
+    scaled_x = scaler.transform(x)
     classifier = LogisticRegression(
         C=regularization, max_iter=2000, random_state=seed
-    ).fit(scaler.transform(x), y)
-    return scaler, classifier, x, y
+    ).fit(scaled_x, y)
+    return scaler, classifier, x, scaled_x, y
 
 
 def _evaluate(fitted, train: pd.DataFrame, test: pd.DataFrame, *, seed: int):
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import accuracy_score, f1_score
 
-    scaler, classifier, train_x, train_y = fitted
+    scaler, classifier, train_x, scaled_train_x, train_y = fitted
     test_x = np.stack(test["feature"].map(np.asarray))
     test_y = test["label"].to_numpy()
-    prediction = classifier.predict(scaler.transform(test_x))
+    scaled_test_x = scaler.transform(test_x)
+    prediction = classifier.predict(scaled_test_x)
     majority = Counter(train_y).most_common(1)[0][0]
     rng = np.random.default_rng(seed)
     shuffled_y = train_y.copy()
     rng.shuffle(shuffled_y)
     shuffled = LogisticRegression(
         C=classifier.C, max_iter=2000, random_state=seed
-    ).fit(scaler.transform(train_x), shuffled_y).predict(scaler.transform(test_x))
+    ).fit(scaled_train_x, shuffled_y).predict(scaled_test_x)
     random_train = rng.normal(size=train_x.shape)
     random_test = rng.normal(size=test_x.shape)
     random_feature = LogisticRegression(
