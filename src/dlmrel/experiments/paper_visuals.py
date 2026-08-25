@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import torch
 
@@ -117,6 +118,15 @@ def _frozen_cases(examples, locks: PaperLockSet) -> list[HeatmapCase]:
     return cases
 
 
+def _numeric_attention_matrix(value: Any) -> np.ndarray:
+    """Restore a numeric matrix from Arrow's nested object-array representation."""
+    nested = value.tolist() if isinstance(value, np.ndarray) else value
+    matrix = np.asarray(nested, dtype=np.float32)
+    if matrix.ndim != 2:
+        raise ValueError(f"attention evidence must be two-dimensional, got {matrix.shape}")
+    return matrix
+
+
 def trajectory_chunk(
     model,
     tokenizer,
@@ -213,7 +223,7 @@ def plot_saved_evidence(run_dir: str | Path) -> list[str]:
         path = figure_dir / f"{relation}__seed-{seed}__trajectory.pdf"
         with PdfPages(path) as pdf:
             for row in group.sort_values("timestep").itertuples(index=False):
-                matrix = torch.tensor(row.attention).numpy()
+                matrix = _numeric_attention_matrix(row.attention)
                 figure, axis = plt.subplots(figsize=(9, 8))
                 image = axis.imshow(matrix, cmap="viridis", aspect="auto")
                 axis.set_title(
@@ -242,7 +252,11 @@ def plot_saved_evidence(run_dir: str | Path) -> list[str]:
                 rows = math.ceil(len(heads) / columns)
                 figure, axes = plt.subplots(rows, columns, figsize=(12, 3 * rows), squeeze=False)
                 for axis, head_row in zip(axes.flat, heads, strict=False):
-                    axis.imshow(head_row.attention, cmap="viridis", aspect="auto")
+                    axis.imshow(
+                        _numeric_attention_matrix(head_row.attention),
+                        cmap="viridis",
+                        aspect="auto",
+                    )
                     axis.set_title(f"L{layer}H{head_row.head}")
                     axis.set_xticks([])
                     axis.set_yticks([])
