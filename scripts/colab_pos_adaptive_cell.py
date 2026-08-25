@@ -430,10 +430,10 @@ run(
 )
 
 adaptive_dir = RUN_DIR / "pos_adaptive"
-status = json.loads((adaptive_dir / "status.json").read_text(encoding="utf-8"))
+status = json.loads((adaptive_dir / "adaptive_manifest.json").read_text(encoding="utf-8"))
 if status.get("status") != "confirmed":
     raise RuntimeError("Adaptive POS evidence is not confirmed; rankings remain unavailable")
-rankings = adaptive_dir / "pos_head_rankings.csv"
+rankings = adaptive_dir / "pos_head_rankings_adaptive.csv"
 if not rankings.is_file():
     raise RuntimeError("Confirmed status exists but the validated ranking artifact is missing")
 print(f"CONFIRMED reduced-grid rankings: {rankings}")
