@@ -148,6 +148,43 @@ def test_both_colab_notebooks_are_valid_thin_restart_safe_launchers():
     ]
 
 
+def test_primary_pos_notebooks_are_cpu_only_pinned_resumable_launchers():
+    names = [
+        "DiffuLLaMA_POS_Primary_Adaptive.ipynb",
+        "Dream_POS_Primary_Adaptive.ipynb",
+    ]
+    rendered = []
+    pins = []
+    for name in names:
+        notebook = json.loads((ROOT / "notebooks" / name).read_text())
+        assert notebook["nbformat"] == 4
+        sources = "\n".join(
+            "".join(cell.get("source", [])) for cell in notebook["cells"]
+        )
+        rendered.append(sources)
+        pin = re.search(r"^PROTOCOL_COMMIT = '([0-9a-f]{40})'$", sources, re.MULTILINE)
+        assert pin is not None
+        pins.append(pin.group(1))
+        for required in (
+            "CUDA_VISIBLE_DEVICES",
+            "pos-fit-primary-adaptive",
+            "validate-pos-primary-adaptive",
+            "--resume",
+            "TOTAL_BUDGET_SECONDS = 5 * 60 * 60",
+            "VALIDATION_RESERVE_SECONDS = 15 * 60",
+            "pytest",
+            "pos_adaptive_primary",
+        ):
+            assert required in sources
+        assert "'pos-fit-adaptive-12'" not in sources
+        for cell in notebook["cells"]:
+            if cell["cell_type"] == "code":
+                ast.parse("".join(cell["source"]))
+    assert pins == ["c5931fb775dc45d15c072fc7f95f5b289a52e33d"] * 2
+    assert "dlmrel-paper-results (1)/diffullama" in rendered[0]
+    assert "exploratory_extensions/dream_7b" in rendered[1]
+
+
 def test_fake_cli_runs_and_validates_all_ten_canonical_experiments(tmp_path, capsys, monkeypatch):
     results = tmp_path / "p"
 
