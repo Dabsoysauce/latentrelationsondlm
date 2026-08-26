@@ -7,16 +7,16 @@ import pandas as pd
 
 from dlmrel.artifacts import canonical_hash, dataframe_records
 from dlmrel.experiments import paper_causal, paper_pos
-from dlmrel.experiments.paper_pos_adaptive import HEADS
 from dlmrel.experiments.paper_pos_adaptive_12 import candidate_set_12
 
 
-def _screen():
+def _screen(head_count=32):
+    heads = tuple(f"head_{index}" for index in range(head_count))
     return pd.DataFrame(
         {
-            "feature_kind": list(HEADS),
-            "accuracy": [0.2 + index * 0.01 for index in range(32)],
-            "n_positions": [1000] * 32,
+            "feature_kind": list(heads),
+            "accuracy": [0.2 + index * 0.01 for index in range(head_count)],
+            "n_positions": [1000] * head_count,
         }
     )
 
@@ -32,6 +32,16 @@ def test_fixed_candidate_rule_is_symmetric_deterministic_and_exactly_12():
     assert {"head_31", "head_30", "head_29", "head_28"}.issubset(selected)
     assert {"head_0", "head_1", "head_2", "head_3"}.issubset(selected)
     assert {"head_27", "head_26", "head_5", "head_4"}.issubset(selected)
+
+
+def test_fixed_candidate_rule_supports_dream_28_head_inventory():
+    selected, reasons = candidate_set_12(_screen(28))
+    assert len(selected) == 12
+    assert {"head_27", "head_26", "head_25", "head_24"}.issubset(selected)
+    assert {"head_0", "head_1", "head_2", "head_3"}.issubset(selected)
+    assert {"head_23", "head_22", "head_5", "head_4"}.issubset(selected)
+    assert reasons["head_27"] == ["top_core_rank_1_4"]
+    assert reasons["head_0"] == ["bottom_core_rank_25_28"]
 
 
 def test_main_only_probe_matches_main_columns_of_full_logical_probe_exactly():

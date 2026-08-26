@@ -23,7 +23,6 @@ from threadpoolctl import threadpool_limits
 from ..artifacts import ArtifactError, atomic_json, canonical_hash, dataframe_records
 from . import paper_pos
 from .paper_pos_adaptive import (
-    HEADS,
     PRIMARY_DEPTH,
     PRIMARY_PROGRESS,
     SCREEN_SEED,
@@ -33,7 +32,6 @@ from .paper_pos_adaptive import (
     _metric_frame,
     _ResourceMonitor,
     _saved_context,
-    full_head_grid,
     inventory,
 )
 
@@ -44,6 +42,38 @@ DEPTHS = ("early", "middle", "late")
 CANDIDATES_PER_DEPTH = 12
 
 
+def _head_inventory(run_dir: Path) -> tuple[str, ...]:
+    """Read the model-specific head inventory from an extracted feature shard."""
+    shards = sorted(
+        (run_dir / "checkpoints").glob("paper-pos-selection-features*.parquet")
+    )
+    if not shards:
+        raise ArtifactError("no extracted POS selection features are available")
+    feature_kinds = pd.read_parquet(shards[0], columns=["feature_kind"])[
+        "feature_kind"
+    ].astype(str)
+    indices = sorted(
+        {
+            int(kind.removeprefix("head_"))
+            for kind in feature_kinds.unique()
+            if kind.startswith("head_") and kind.removeprefix("head_").isdigit()
+        }
+    )
+    if len(indices) < CANDIDATES_PER_DEPTH or indices != list(range(len(indices))):
+        raise ArtifactError("extracted POS features have an invalid attention-head inventory")
+    return tuple(f"head_{index}" for index in indices)
+
+
+def _full_head_grid(cfg, heads: tuple[str, ...]) -> list[FitKey]:
+    return [
+        FitKey(seed, float(progress), depth, head)
+        for seed in cfg.experiment.seeds
+        for progress in cfg.experiment.normalized_progress
+        for depth in DEPTHS
+        for head in heads
+    ]
+
+
 def candidate_set_12(screen: pd.DataFrame) -> tuple[set[str], dict[str, list[str]]]:
     """Select a symmetric, frozen 12-head set from the seed-42 screen.
 
@@ -51,8 +81,10 @@ def candidate_set_12(screen: pd.DataFrame) -> tuple[set[str], dict[str, list[str
     and the next two above the bottom boundary. No held-out seed is inspected.
     """
     ordered = screen.sort_values(["accuracy", "feature_kind"], ascending=[False, True])
-    if len(ordered) != 32 or set(ordered.feature_kind) != set(HEADS):
-        raise ArtifactError("12-candidate selection requires all 32 screen heads")
+    heads = tuple(sorted(set(ordered.feature_kind), key=lambda value: int(value.split("_")[1])))
+    expected = tuple(f"head_{index}" for index in range(len(heads)))
+    if len(heads) < CANDIDATES_PER_DEPTH or heads != expected or len(ordered) != len(heads):
+        raise ArtifactError("12-candidate selection requires one result for every model head")
     top = list(ordered.iloc[:4].feature_kind)
     high_boundary = list(ordered.iloc[4:6].feature_kind)
     low_boundary = list(ordered.iloc[-6:-4].feature_kind)
@@ -68,9 +100,9 @@ def candidate_set_12(screen: pd.DataFrame) -> tuple[set[str], dict[str, list[str
         if head in high_boundary:
             tags.append("high_boundary_rank_5_6")
         if head in low_boundary:
-            tags.append("low_boundary_rank_27_28")
+            tags.append(f"low_boundary_rank_{len(heads) - 5}_{len(heads) - 4}")
         if head in bottom:
-            tags.append("bottom_core_rank_29_32")
+            tags.append(f"bottom_core_rank_{len(heads) - 3}_{len(heads)}")
         reasons[head] = tags
     return chosen, reasons
 
@@ -335,9 +367,9 @@ def _fit_main_keys(
     return _main_inventory(store, keys)
 
 
-def _coverage(cfg, canonical, main, phase_reason):
+def _coverage(cfg, heads, canonical, main, phase_reason):
     rows = []
-    for key in full_head_grid(cfg):
+    for key in _full_head_grid(cfg, heads):
         canonical_full = key in canonical
         main_only = key in main and not canonical_full
         phase, reason = phase_reason.get(
@@ -375,6 +407,7 @@ def run_adaptive_12(
     output = run_dir / OUTPUT_NAME
     output.mkdir(parents=True, exist_ok=True)
     cfg, _manifests, _canonical_store, depth_mapping = _saved_context(run_dir)
+    heads = _head_inventory(run_dir)
     if not set(PROGRESS_VALUES).issubset(set(map(float, cfg.experiment.normalized_progress))):
         raise ArtifactError("saved extraction lacks one of progress .25/.50/.75")
     started = time.monotonic()
@@ -387,8 +420,10 @@ def run_adaptive_12(
         "trajectory_progress": list(PROGRESS_VALUES),
         "depths": list(DEPTHS),
         "candidates_per_depth": CANDIDATES_PER_DEPTH,
+        "head_inventory": list(heads),
         "candidate_rule": (
-            "top 4 + ranks 5-6 + ranks 27-28 + bottom 4 from the seed-42 p=.5 screen"
+            "top 4 + ranks 5-6 + the two ranks immediately above the bottom 4 + "
+            "bottom 4 from the seed-42 p=.5 screen"
         ),
         "controls_scope": (
             "canonical shuffled-label and random-feature controls for final high/low "
@@ -416,7 +451,7 @@ def run_adaptive_12(
     screen_keys = {
         FitKey(SCREEN_SEED, PRIMARY_PROGRESS, depth, head)
         for depth in DEPTHS
-        for head in HEADS
+        for head in heads
     }
     for key in screen_keys:
         phase_reason[key] = ("A_all_head_screen", "fixed seed-42 all-head p=.5 screen")
@@ -615,7 +650,7 @@ def run_adaptive_12(
         )
         & main_metrics.normalized_progress.isin(PROGRESS_VALUES)
     ].copy()
-    coverage = _coverage(cfg, canonical, main, phase_reason)
+    coverage = _coverage(cfg, heads, canonical, main, phase_reason)
     residual_rows = []
     for key, (_evidence, metrics) in sorted(residual.items(), key=lambda item: item[0].tuple()):
         residual_rows.append(
@@ -641,6 +676,8 @@ def run_adaptive_12(
         "status": "confirmed",
         "adaptive_reduced_grid": True,
         "fixed_candidates_per_depth": CANDIDATES_PER_DEPTH,
+        "head_inventory": list(heads),
+        "head_count": len(heads),
         "matched_causal_ablation_allowed": True,
         "confirmed_depths": list(DEPTHS),
         "progress_values": list(PROGRESS_VALUES),
@@ -708,8 +745,16 @@ def validate_adaptive_12(run_dir: str | Path) -> dict[str, Any]:
     ).seed.nunique()
     if len(trajectory_counts) != 18 or not trajectory_counts.eq(3).all():
         raise ArtifactError("selected-head trajectory lacks three-seed coverage")
-    if len(coverage) != 1152 or coverage.iloc[:, :4].duplicated().any():
-        raise ArtifactError("coverage manifest is not the exact 1,152-head universe")
+    heads = tuple(manifest.get("head_inventory", ()))
+    expected_rows = 3 * 4 * len(DEPTHS) * len(heads)
+    if (
+        len(heads) < CANDIDATES_PER_DEPTH
+        or manifest.get("head_count") != len(heads)
+        or len(coverage) != expected_rows
+        or coverage.iloc[:, :4].duplicated().any()
+        or set(coverage.feature_kind.astype(str)) != set(heads)
+    ):
+        raise ArtifactError("coverage manifest is not the exact model-head universe")
     hashes = {
         "choices_file_hash": canonical_hash(dataframe_records(choices)),
         "ranking_file_hash": canonical_hash(dataframe_records(rankings)),
