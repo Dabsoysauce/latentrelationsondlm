@@ -236,6 +236,29 @@ def test_validator_detects_modified_instances_and_duplicate_rows(tmp_path):
     assert "instance Parquet and JSON shards differ" in result["errors"]
 
 
+def test_validator_distinguishes_native_token_and_depth_observations(tmp_path):
+    run = _complete_valid_run(tmp_path)
+    instances = pd.read_parquet(run / "instances.parquet")
+    native_rows = pd.concat([instances, instances], ignore_index=True)
+    n_rows = len(instances)
+    native_rows["relative_label"] = ["early"] * n_rows + ["middle"] * n_rows
+    native_rows["actual_layer_index"] = [6] * n_rows + [16] * n_rows
+    native_rows["target_position"] = [18] * n_rows + [19] * n_rows
+    native_rows["prediction_source_position"] = [17] * n_rows + [18] * n_rows
+    for shard in (run / "checkpoints").glob("shard-*.json"):
+        shard.unlink()
+    write_frames(run, raw=native_rows, exclusions=pd.DataFrame())
+
+    summary = json.loads((run / "summary.json").read_text(encoding="utf-8"))
+    summary["n_rows"] = len(native_rows)
+    atomic_json(run / "summary.json", summary)
+    metadata = json.loads((run / "run_metadata.json").read_text(encoding="utf-8"))
+    metadata["final_artifact_hashes"] = final_artifact_hashes(run)
+    atomic_json(run / "run_metadata.json", metadata)
+
+    assert validate_run(run)["valid"] is True
+
+
 def test_validator_detects_infinite_metric_and_nonfinite_json(tmp_path):
     run = _complete_valid_run(tmp_path)
     pd.DataFrame([{"accuracy": float("inf")}]).to_csv(run / "metrics.csv", index=False)

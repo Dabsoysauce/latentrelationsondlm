@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import torch
 
-from ..artifacts import ArtifactError
+from ..artifacts import ArtifactError, canonical_hash, dataframe_records
 from ..batching import adaptive_forward_batches
 from ..checkpoints import CheckpointIdentity, SentenceCheckpointStore
 from ..config import RunConfig
@@ -53,7 +55,7 @@ def matched_low_relation_controls(locks: PaperLockSet) -> dict[str, tuple[int, i
         if candidates.empty:
             raise ArtifactError(f"no matched low-relation control for {relation}")
         row = candidates.iloc[0]
-        controls[relation] = (int(row.layer), int(row.head))
+        controls[relation] = (int(row["layer"]), int(row["head"]))
     return controls
 
 
@@ -285,6 +287,91 @@ def _pos_control_pairs() -> list[tuple[str, int, int]]:
         )
     source = Path(configured)
     run_dir = source if source.is_dir() else source.parent
+    adaptive_manifest_path = run_dir / "adaptive_manifest.json"
+    if not adaptive_manifest_path.is_file() and (run_dir / "pos_adaptive").is_dir():
+        run_dir = run_dir / "pos_adaptive"
+        adaptive_manifest_path = run_dir / "adaptive_manifest.json"
+    if not adaptive_manifest_path.is_file() and (run_dir / "pos_adaptive_12").is_dir():
+        run_dir = run_dir / "pos_adaptive_12"
+        adaptive_manifest_path = run_dir / "adaptive_manifest.json"
+    if adaptive_manifest_path.is_file():
+        try:
+            manifest = json.loads(adaptive_manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ArtifactError("adaptive POS manifest is unreadable") from error
+        adaptive_schema = manifest.get("schema_version")
+        if (
+            adaptive_schema
+            not in {"dlmrel-pos-adaptive-v1", "dlmrel-pos-adaptive-12-v1"}
+            or manifest.get("status") != "confirmed"
+            or manifest.get("matched_causal_ablation_allowed") is not True
+            or manifest.get("adaptive_reduced_grid") is not True
+        ):
+            raise ArtifactError("adaptive POS rankings have not passed held-out confirmation")
+        choices_path = run_dir / "pos_head_choices.csv"
+        rankings_path = run_dir / (
+            "pos_head_rankings_adaptive_12.csv"
+            if adaptive_schema == "dlmrel-pos-adaptive-12-v1"
+            else "pos_head_rankings_adaptive.csv"
+        )
+        coverage_path = run_dir / "coverage_manifest.csv"
+        if not all(path.is_file() for path in (choices_path, rankings_path, coverage_path)):
+            raise ArtifactError("adaptive POS ranking bundle is incomplete")
+        choices = pd.read_csv(choices_path)
+        rankings = pd.read_csv(rankings_path)
+        coverage = pd.read_csv(coverage_path)
+        hashes = {
+            "choices_file_hash": canonical_hash(dataframe_records(choices)),
+            "ranking_file_hash": canonical_hash(dataframe_records(rankings)),
+            "coverage_manifest_hash": canonical_hash(dataframe_records(coverage)),
+        }
+        if any(manifest.get(key) != value for key, value in hashes.items()):
+            raise ArtifactError("adaptive POS ranking bundle does not match its confirmed manifest")
+        required = {
+            "relative_label",
+            "actual_layer_index",
+            "high_feature_kind",
+            "low_feature_kind",
+            "confirmed",
+        }
+        required_depths = set(
+            map(str, manifest.get("confirmed_depths", ["early", "middle", "late"]))
+        )
+        if not required.issubset(choices.columns) or set(
+            choices["relative_label"].astype(str)
+        ) != required_depths:
+            raise ArtifactError("adaptive POS choices are incomplete")
+        confirmed_values = choices["confirmed"].astype(str).str.lower()
+        if not confirmed_values.isin({"true", "1"}).all():
+            raise ArtifactError("adaptive POS choices contain an unconfirmed depth")
+        pairs = []
+        for row in choices.sort_values("relative_label").itertuples(index=False):
+            high = str(row.high_feature_kind)
+            low = str(row.low_feature_kind)
+            if not re.fullmatch(r"head_\d+", high) or not re.fullmatch(r"head_\d+", low):
+                raise ArtifactError("adaptive POS choice has an invalid head identifier")
+            layer = int(row.actual_layer_index)
+            label = str(row.relative_label)
+            protocol_suffix = (
+                "primary_p050_fixed12"
+                if adaptive_schema == "dlmrel-pos-adaptive-12-v1"
+                else "primary_p050"
+            )
+            pairs.extend(
+                (
+                    (
+                        f"most_pos_decodable_{protocol_suffix}_{label}",
+                        layer,
+                        int(high.removeprefix("head_")),
+                    ),
+                    (
+                        f"lower_pos_decoding_{protocol_suffix}_{label}",
+                        layer,
+                        int(low.removeprefix("head_")),
+                    ),
+                )
+            )
+        return pairs
     rankings_path = source / "pos_head_rankings.csv" if source.is_dir() else source
     mapping_path = run_dir / "relative_depth_mapping.csv"
     if not rankings_path.is_file() or not mapping_path.is_file():

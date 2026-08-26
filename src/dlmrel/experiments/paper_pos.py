@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import subprocess
 import tempfile
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -429,27 +432,29 @@ def _fit(frame: pd.DataFrame, *, seed: int, regularization: float):
     if len(set(y)) < 2:
         raise ValueError("POS selection features contain fewer than two classes")
     scaler = StandardScaler().fit(x)
+    scaled_x = scaler.transform(x)
     classifier = LogisticRegression(
         C=regularization, max_iter=2000, random_state=seed
-    ).fit(scaler.transform(x), y)
-    return scaler, classifier, x, y
+    ).fit(scaled_x, y)
+    return scaler, classifier, x, scaled_x, y
 
 
 def _evaluate(fitted, train: pd.DataFrame, test: pd.DataFrame, *, seed: int):
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import accuracy_score, f1_score
 
-    scaler, classifier, train_x, train_y = fitted
+    scaler, classifier, train_x, scaled_train_x, train_y = fitted
     test_x = np.stack(test["feature"].map(np.asarray))
     test_y = test["label"].to_numpy()
-    prediction = classifier.predict(scaler.transform(test_x))
+    scaled_test_x = scaler.transform(test_x)
+    prediction = classifier.predict(scaled_test_x)
     majority = Counter(train_y).most_common(1)[0][0]
     rng = np.random.default_rng(seed)
     shuffled_y = train_y.copy()
     rng.shuffle(shuffled_y)
     shuffled = LogisticRegression(
         C=classifier.C, max_iter=2000, random_state=seed
-    ).fit(scaler.transform(train_x), shuffled_y).predict(scaler.transform(test_x))
+    ).fit(scaled_train_x, shuffled_y).predict(scaled_test_x)
     random_train = rng.normal(size=train_x.shape)
     random_test = rng.normal(size=test_x.shape)
     random_feature = LogisticRegression(
@@ -470,6 +475,163 @@ def _evaluate(fitted, train: pd.DataFrame, test: pd.DataFrame, *, seed: int):
         "class_counts": dict(Counter(test_y)),
     }
     return evidence, metrics
+
+
+def _evaluate_main_only(fitted, train: pd.DataFrame, test: pd.DataFrame, *, seed: int):
+    """Evaluate only the scientific probe used for ranking.
+
+    This is numerically identical to the main-classifier portion of ``_evaluate``.
+    Reduced protocols use it for screening and held-out ranking, then run the
+    ordinary full logical probe (including both controls) for the final causal
+    heads. It never writes a canonical fit checkpoint.
+    """
+    from sklearn.metrics import accuracy_score, f1_score
+
+    scaler, classifier, _train_x, _scaled_train_x, train_y = fitted
+    test_x = np.stack(test["feature"].map(np.asarray))
+    test_y = test["label"].to_numpy()
+    prediction = classifier.predict(scaler.transform(test_x))
+    majority = Counter(train_y).most_common(1)[0][0]
+    evidence = test.drop(columns="feature").copy()
+    evidence["prediction"] = prediction
+    evidence["majority_prediction"] = majority
+    metrics = {
+        "accuracy": accuracy_score(test_y, prediction),
+        "macro_f1": f1_score(test_y, prediction, average="macro", zero_division=0),
+        "majority_accuracy": accuracy_score(test_y, np.repeat(majority, len(test_y))),
+        "n_positions": len(test_y),
+        "class_counts": dict(Counter(test_y)),
+    }
+    return evidence, metrics
+
+
+def _fit_evaluate_probe(
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    *,
+    seed: int,
+    regularization: float,
+):
+    """Fit one scientifically independent probe without touching shared state."""
+    fitted = _fit(train, seed=seed, regularization=regularization)
+    return _evaluate(fitted, train, test, seed=seed)
+
+
+def _fit_evaluate_main_only(
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    *,
+    seed: int,
+    regularization: float,
+):
+    fitted = _fit(train, seed=seed, regularization=regularization)
+    return _evaluate_main_only(fitted, train, test, seed=seed)
+
+
+def _condition_prefix(stage: str, seed: int, progress: float, timestep: int) -> str:
+    stage_slug = re.sub(r"[^A-Za-z0-9_-]+", "-", stage).strip("-")
+    return (
+        f"{stage_slug}__seed-{seed}__p-{progress:.6f}__"
+        f"t-{timestep}__heads-all__sentences-"
+    )
+
+
+def _atomic_copy(source: Path, destination: Path) -> None:
+    """Copy one read-only staging file without exposing a partial destination."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.unlink(missing_ok=True)
+    shutil.copy2(source, temporary)
+    os.replace(temporary, destination)
+
+
+def _feature_store_for_condition(
+    run_dir: Path,
+    *,
+    stage: str,
+    seed: int,
+    progress: float,
+    timestep: int,
+    cache_root: str | Path | None,
+) -> SentenceCheckpointStore:
+    """Return the Drive store or a validated local read-only staging store.
+
+    Only the requested condition is copied. Fit checkpoints and final artifacts
+    are never redirected: callers continue to write those atomically to
+    ``run_dir``. The ordinary checkpoint validator remains authoritative and
+    fails closed on a corrupt same-sized local copy.
+    """
+    source_store = SentenceCheckpointStore(run_dir)
+    if cache_root is None:
+        return source_store
+
+    scientific_slug = re.sub(
+        r"[^A-Za-z0-9_-]+", "-", str(source_store.scientific_config_hash)
+    ).strip("-")[:16]
+    local_run = Path(cache_root) / f"dlmrel-pos-features-{scientific_slug}"
+    local_checkpoints = local_run / "checkpoints"
+    prefix = _condition_prefix(stage, seed, progress, timestep)
+    source_paths = sorted(source_store.directory.glob(f"{prefix}*"))
+    parquet_paths = [path for path in source_paths if path.suffix == ".parquet"]
+    if not parquet_paths:
+        raise ArtifactError(
+            f"no extracted checkpoints for stage={stage!r} seed={seed} progress={progress}"
+        )
+    required_paths = []
+    for parquet in parquet_paths:
+        metadata = parquet.with_suffix(".meta.json")
+        if not metadata.is_file():
+            raise ArtifactError(f"checkpoint chunk missing metadata: {parquet.name}")
+        required_paths.extend((parquet, metadata))
+
+    missing_bytes = sum(
+        source.stat().st_size
+        for source in required_paths
+        if not (local_checkpoints / source.name).is_file()
+        or (local_checkpoints / source.name).stat().st_size != source.stat().st_size
+    )
+    local_run.mkdir(parents=True, exist_ok=True)
+    free_bytes = shutil.disk_usage(local_run).free
+    if missing_bytes and free_bytes < int(missing_bytes * 1.15):
+        raise ArtifactError(
+            "insufficient local disk to stage the active POS feature condition: "
+            f"need {missing_bytes * 1.15 / 2**30:.2f} GiB including safety margin, "
+            f"have {free_bytes / 2**30:.2f} GiB"
+        )
+
+    for name in ("run_metadata.json", "manifest_refs.json"):
+        source = run_dir / name
+        destination = local_run / name
+        if not destination.is_file() or destination.read_bytes() != source.read_bytes():
+            _atomic_copy(source, destination)
+    for source in required_paths:
+        destination = local_checkpoints / source.name
+        if not destination.is_file() or destination.stat().st_size != source.stat().st_size:
+            _atomic_copy(source, destination)
+    return SentenceCheckpointStore(local_run)
+
+
+def _load_condition_frames(
+    run_dir: Path,
+    *,
+    seed: int,
+    progress: float,
+    cache_root: str | Path | None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    timestep = round(progress * 63)
+    frames = []
+    for role in ("select", "test"):
+        stage = ROLE_STAGE[role]
+        store = _feature_store_for_condition(
+            run_dir,
+            stage=stage,
+            seed=seed,
+            progress=progress,
+            timestep=timestep,
+            cache_root=cache_root,
+        )
+        frames.append(store.require_stage(stage, seed, progress, timestep))
+    return frames[0], frames[1]
 
 
 def _extract(model, tokenizer, cfg: RunConfig, run_dir: Path) -> None:
@@ -576,64 +738,96 @@ def _fit_and_evaluate(cfg: RunConfig, run_dir: Path, *, manifest_hashes: dict) -
         regularization=regularization,
         label_inventory=label_inventory,
     )
-    checkpoint_store = SentenceCheckpointStore(run_dir)
-
-    # Selection frames are organized eagerly (cheap: no sklearn fit happens
-    # here), but the actual classifier fit is deferred into the test loop
-    # below and only run for a (seed, progress, relative_label, feature_kind)
-    # key whose Phase 2 checkpoint is missing. Fitting thousands of
-    # classifiers just to discover their evaluation was already checkpointed
-    # would defeat the point of resuming an interrupted fit stage.
-    frozen: dict = {}
-    selection_frames: dict = {}
-    selection_sentences: set[str] = set()
-    for seed in cfg.experiment.seeds:
-        for progress in cfg.experiment.normalized_progress:
-            frame = checkpoint_store.require_stage(
-                ROLE_STAGE["select"], seed, progress, round(progress * 63)
-            )
-            selection_sentences.update(frame["sentence_id"].astype(str))
-            for identity_values, group in frame.groupby(
-                ["relative_label", "feature_kind"], observed=True
-            ):
-                selection_frames[(seed, progress, *identity_values)] = group
-
     evidence_frames, metric_rows = [], []
+    selection_sentences: set[str] = set()
     test_sentences: set[str] = set()
-    for seed in cfg.experiment.seeds:
-        for progress in cfg.experiment.normalized_progress:
-            frame = checkpoint_store.require_stage(
-                ROLE_STAGE["test"], seed, progress, round(progress * 63)
-            )
-            test_sentences.update(frame["sentence_id"].astype(str))
-            for identity_values, group in frame.groupby(
-                ["relative_label", "feature_kind"], observed=True
-            ):
-                relative_label, feature_kind = identity_values
-                key = (seed, progress, relative_label, feature_kind)
-                cached = fit_store.load(seed, progress, relative_label, feature_kind)
-                if cached is not None:
-                    evidence, metrics = cached
-                else:
-                    if key not in frozen:
-                        frozen[key] = _fit(
-                            selection_frames[key], seed=seed, regularization=regularization
-                        )
-                    evidence, metrics = _evaluate(
-                        frozen[key], selection_frames[key], group, seed=seed
-                    )
-                    fit_store.store(seed, progress, relative_label, feature_kind, evidence, metrics)
-                evidence_frames.append(evidence)
-                metric_rows.append(
-                    {
-                        "seed": seed,
-                        "normalized_progress": progress,
-                        "mask_ratio": 1.0 - progress,
-                        "relative_label": relative_label,
-                        "feature_kind": feature_kind,
-                        **metrics,
-                    }
+    executor = (
+        ThreadPoolExecutor(max_workers=cfg.runtime.pos_fit_workers)
+        if cfg.runtime.pos_fit_workers > 1
+        else None
+    )
+    try:
+        for seed in cfg.experiment.seeds:
+            for progress in cfg.experiment.normalized_progress:
+                # Load each large feature table exactly once, use it for all 99
+                # residual/head fits in this condition, then release it before
+                # moving to the next seed/progress pair. The prior eager layout
+                # retained all 12 selection tables simultaneously.
+                selection_frame, test_frame = _load_condition_frames(
+                    run_dir,
+                    seed=seed,
+                    progress=progress,
+                    cache_root=cfg.runtime.pos_feature_cache,
                 )
+                selection_sentences.update(selection_frame["sentence_id"].astype(str))
+                test_sentences.update(test_frame["sentence_id"].astype(str))
+                selection_groups = {
+                    identity: group
+                    for identity, group in selection_frame.groupby(
+                        ["relative_label", "feature_kind"], observed=True, sort=True
+                    )
+                }
+                groups = list(
+                    test_frame.groupby(
+                        ["relative_label", "feature_kind"], observed=True, sort=True
+                    )
+                )
+                resolved: dict = {}
+                pending = []
+                for identity_values, group in groups:
+                    relative_label, feature_kind = identity_values
+                    key = (seed, progress, relative_label, feature_kind)
+                    cached = fit_store.load(seed, progress, relative_label, feature_kind)
+                    if cached is not None:
+                        resolved[key] = cached
+                        continue
+                    arguments = {
+                        "seed": seed,
+                        "regularization": regularization,
+                    }
+                    if executor is None:
+                        resolved[key] = _fit_evaluate_probe(
+                            selection_groups[identity_values], group, **arguments
+                        )
+                        fit_store.store(*key, *resolved[key])
+                    else:
+                        pending.append(
+                            (
+                                key,
+                                executor.submit(
+                                    _fit_evaluate_probe,
+                                    selection_groups[identity_values],
+                                    group,
+                                    **arguments,
+                                ),
+                            )
+                        )
+                # Resolve in canonical group order. Only the parent thread writes
+                # checkpoints, so atomic resume behavior is unchanged.
+                for key, future in pending:
+                    resolved[key] = future.result()
+                    fit_store.store(*key, *resolved[key])
+                for identity_values, _group in groups:
+                    relative_label, feature_kind = identity_values
+                    key = (seed, progress, relative_label, feature_kind)
+                    evidence, metrics = resolved[key]
+                    evidence_frames.append(evidence)
+                    metric_rows.append(
+                        {
+                            "seed": seed,
+                            "normalized_progress": progress,
+                            "mask_ratio": 1.0 - progress,
+                            "relative_label": relative_label,
+                            "feature_kind": feature_kind,
+                            **metrics,
+                        }
+                    )
+                # Make condition-at-a-time memory release explicit before the
+                # next multi-gigabyte table pair is opened.
+                del selection_groups, groups, selection_frame, test_frame, resolved
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
     raw = pd.concat(evidence_frames, ignore_index=True)
     per_seed = pd.DataFrame(metric_rows)
     exclusions_path = run_dir / "extract_exclusions.parquet"
@@ -680,6 +874,19 @@ def _fit_and_evaluate(cfg: RunConfig, run_dir: Path, *, manifest_hashes: dict) -
     }
 
 
+def _run_fit_stage(cfg: RunConfig, run_dir: Path, *, manifest_hashes: dict) -> dict[str, Any]:
+    """Run fitting with one native thread per independently scheduled probe."""
+    if cfg.runtime.pos_fit_workers <= 1:
+        return _fit_and_evaluate(cfg, run_dir, manifest_hashes=manifest_hashes)
+    from threadpoolctl import threadpool_limits
+
+    # sklearn/scipy wheels normally expose an OpenMP pool and one or more BLAS
+    # pools. Without this guard, W Python workers each request all C logical
+    # CPUs (W*C runnable threads), which is the observed Colab bottleneck.
+    with threadpool_limits(limits=1):
+        return _fit_and_evaluate(cfg, run_dir, manifest_hashes=manifest_hashes)
+
+
 def run(
     model,
     tokenizer,
@@ -704,6 +911,6 @@ def run(
         _extract(model, tokenizer, cfg, run_dir)
         return {"pos_stage": "extract", "extract_complete": True}
     if pos_stage == "fit":
-        return {"pos_stage": "fit", **_fit_and_evaluate(cfg, run_dir, manifest_hashes=manifest_hashes)}
+        return {"pos_stage": "fit", **_run_fit_stage(cfg, run_dir, manifest_hashes=manifest_hashes)}
     _extract(model, tokenizer, cfg, run_dir)
-    return {"pos_stage": "all", **_fit_and_evaluate(cfg, run_dir, manifest_hashes=manifest_hashes)}
+    return {"pos_stage": "all", **_run_fit_stage(cfg, run_dir, manifest_hashes=manifest_hashes)}

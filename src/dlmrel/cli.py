@@ -68,6 +68,8 @@ def resolve_run(args) -> RunConfig:
         intervention_batch_size=args.intervention_batch_size,
         sentence_batch_size=args.sentence_batch_size,
         adaptive_batch_max_size=args.adaptive_batch_max_size,
+        pos_fit_workers=args.pos_fit_workers,
+        pos_feature_cache=args.pos_feature_cache,
         export_attention_cache=args.export_attention_cache,
         attention_cache=args.attention_cache,
         pos_stage=args.pos_stage,
@@ -280,6 +282,46 @@ def cmd_summarize(args) -> None:
     print(json.dumps(payload, indent=2, default=str))
 
 
+def cmd_pos_fit_adaptive(args) -> None:
+    """Benchmark and run the preregistered CPU-only reduced POS protocol."""
+    from .experiments.paper_pos_adaptive import run_adaptive
+
+    result = run_adaptive(
+        args.run_dir,
+        cache_root=args.local_cache,
+        budget_seconds=args.budget_seconds,
+        validation_reserve_seconds=args.validation_reserve_seconds,
+        worker_counts=tuple(args.worker_counts),
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+def cmd_validate_pos_adaptive(args) -> None:
+    from .experiments.paper_pos_adaptive import validate_adaptive
+
+    print(json.dumps(validate_adaptive(args.run_dir), indent=2, sort_keys=True))
+
+
+def cmd_pos_fit_adaptive_12(args) -> None:
+    """Run the fixed 12-candidate, three-depth/three-progress POS protocol."""
+    from .experiments.paper_pos_adaptive_12 import run_adaptive_12
+
+    result = run_adaptive_12(
+        args.run_dir,
+        cache_root=args.local_cache,
+        budget_seconds=args.budget_seconds,
+        validation_reserve_seconds=args.validation_reserve_seconds,
+        worker_counts=tuple(args.worker_counts),
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+def cmd_validate_pos_adaptive_12(args) -> None:
+    from .experiments.paper_pos_adaptive_12 import validate_adaptive_12
+
+    print(json.dumps(validate_adaptive_12(args.run_dir), indent=2, sort_keys=True))
+
+
 def cmd_derive_relation_locks(args) -> None:
     build = derive_relation_selection_bundle(args.source_run, args.output)
     statuses = {
@@ -423,6 +465,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="safe upper bound for successful timestep and sentence batch growth",
     )
     run.add_argument(
+        "--pos-fit-workers",
+        type=int,
+        default=1,
+        help=(
+            "POS fit stage only: number of independent head probes fitted in "
+            "parallel; each probe keeps the same data, solver, seed, and checkpoint"
+        ),
+    )
+    run.add_argument(
+        "--pos-feature-cache",
+        help=(
+            "POS fit stage only: optional local directory for validated read-only copies "
+            "of the active extracted feature tables; finished fit checkpoints still write "
+            "atomically to the results directory"
+        ),
+    )
+    run.add_argument(
         "--export-attention-cache",
         action="store_true",
         help="save entropy rows while running the English relation trajectory",
@@ -473,6 +532,54 @@ def build_parser() -> argparse.ArgumentParser:
     summarize.add_argument("--run-dir", required=True)
     summarize.add_argument("--rows", type=int, default=20)
     summarize.set_defaults(func=cmd_summarize)
+
+    adaptive_pos = commands.add_parser(
+        "pos-fit-adaptive",
+        help=(
+            "CPU only: benchmark, resume, and run the preregistered reduced POS head "
+            "protocol without loading a model or finalizing the canonical full grid"
+        ),
+    )
+    adaptive_pos.add_argument("--run-dir", required=True)
+    adaptive_pos.add_argument("--local-cache")
+    adaptive_pos.add_argument("--budget-seconds", type=int, default=10800)
+    adaptive_pos.add_argument("--validation-reserve-seconds", type=int, default=900)
+    adaptive_pos.add_argument(
+        "--worker-counts", type=int, nargs="+", default=[6, 8, 10, 12]
+    )
+    adaptive_pos.set_defaults(func=cmd_pos_fit_adaptive)
+
+    validate_adaptive_pos = commands.add_parser(
+        "validate-pos-adaptive",
+        help="validate a confirmed adaptive POS bundle without loading a model",
+    )
+    validate_adaptive_pos.add_argument("--run-dir", required=True)
+    validate_adaptive_pos.set_defaults(func=cmd_validate_pos_adaptive)
+
+    adaptive_pos_12 = commands.add_parser(
+        "pos-fit-adaptive-12",
+        help=(
+            "CPU only: fixed 12 candidates/depth, held-out confirmation, and "
+            ".25/.50/.75 trajectories for confirmed high/low heads"
+        ),
+    )
+    adaptive_pos_12.add_argument("--run-dir", required=True)
+    adaptive_pos_12.add_argument("--local-cache")
+    adaptive_pos_12.add_argument("--budget-seconds", type=int, default=28800)
+    adaptive_pos_12.add_argument(
+        "--validation-reserve-seconds", type=int, default=900
+    )
+    adaptive_pos_12.add_argument(
+        "--worker-counts", type=int, nargs="+", default=[6, 8, 10, 12]
+    )
+    adaptive_pos_12.set_defaults(func=cmd_pos_fit_adaptive_12)
+
+    validate_adaptive_pos_12 = commands.add_parser(
+        "validate-pos-adaptive-12",
+        help="validate the confirmed fixed-12 POS bundle without loading a model",
+    )
+    validate_adaptive_pos_12.add_argument("--run-dir", required=True)
+    validate_adaptive_pos_12.set_defaults(func=cmd_validate_pos_adaptive_12)
 
     derive = commands.add_parser(
         "derive-relation-locks",

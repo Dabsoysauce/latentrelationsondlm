@@ -450,10 +450,14 @@ def validate_run(path: str | Path) -> dict[str, Any]:
                 "timestep",
                 "normalized_progress",
                 "relation",
+                "relative_label",
                 "layer",
+                "actual_layer_index",
                 "head",
                 "depth",
                 "position",
+                "target_position",
+                "prediction_source_position",
             )
             if column in instances
         ]

@@ -230,6 +230,8 @@ class RuntimeConfig:
     intervention_batch_size: int = 8
     sentence_batch_size: int = 8
     adaptive_batch_max_size: int = 32
+    pos_fit_workers: int = 1
+    pos_feature_cache: str | None = None
     export_attention_cache: bool = False
     attention_cache: str | None = None
     pos_stage: str = "all"
@@ -260,6 +262,8 @@ class RunConfig:
             raise ConfigError("runtime intervention_batch_size must be positive")
         if self.runtime.sentence_batch_size < 1:
             raise ConfigError("runtime sentence_batch_size must be positive")
+        if self.runtime.pos_fit_workers < 1:
+            raise ConfigError("runtime pos_fit_workers must be positive")
         if self.runtime.adaptive_batch_max_size < max(
             self.runtime.timestep_batch_size, self.runtime.sentence_batch_size
         ):

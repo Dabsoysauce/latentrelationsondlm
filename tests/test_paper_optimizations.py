@@ -7,12 +7,18 @@ fails here rather than silently producing different numbers.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 import torch
 
 from dlmrel.diffusion import state_at_time
-from dlmrel.experiments.paper_causal import _logit_metrics, _target_rows
+from dlmrel.experiments.paper_causal import (
+    _logit_metrics,
+    _target_rows,
+    matched_low_relation_controls,
+)
 from dlmrel.experiments.paper_pos import _forward_features, feature_rows
 from dlmrel.models.decomposition import capture_or_ablate_projection
 from dlmrel.paper_protocol import map_relative_depths
@@ -28,6 +34,21 @@ class TinyTokenizer:
 
     def decode(self, token_ids):
         return str(token_ids[0])
+
+
+def test_matched_low_relation_control_reads_head_column(tmp_path):
+    pd.DataFrame(
+        [
+            {"relation": "object_to_verb", "layer": 4, "head": 7, "accuracy": 0.9, "n_total": 20},
+            {"relation": "object_to_verb", "layer": 4, "head": 3, "accuracy": 0.1, "n_total": 20},
+        ]
+    ).to_csv(tmp_path / "selection_all_head_scores.csv", index=False)
+    locks = SimpleNamespace(
+        source=tmp_path,
+        locks={"object_to_verb": SimpleNamespace(layer=4, head=7)},
+    )
+
+    assert matched_low_relation_controls(locks) == {"object_to_verb": (4, 3)}
 
 
 class _Attention(torch.nn.Module):
