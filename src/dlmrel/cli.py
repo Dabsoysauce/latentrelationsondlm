@@ -322,6 +322,26 @@ def cmd_validate_pos_adaptive_12(args) -> None:
     print(json.dumps(validate_adaptive_12(args.run_dir), indent=2, sort_keys=True))
 
 
+def cmd_pos_fit_primary_adaptive(args) -> None:
+    """Run the primary-condition-only adaptive POS protocol."""
+    from .experiments.paper_pos_primary_adaptive import run_primary_adaptive
+
+    result = run_primary_adaptive(
+        args.run_dir,
+        cache_root=args.local_cache,
+        budget_seconds=args.budget_seconds,
+        validation_reserve_seconds=args.validation_reserve_seconds,
+        worker_counts=tuple(args.worker_counts),
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+def cmd_validate_pos_primary_adaptive(args) -> None:
+    from .experiments.paper_pos_primary_adaptive import validate_primary_adaptive
+
+    print(json.dumps(validate_primary_adaptive(args.run_dir), indent=2, sort_keys=True))
+
+
 def cmd_derive_relation_locks(args) -> None:
     build = derive_relation_selection_bundle(args.source_run, args.output)
     statuses = {
@@ -580,6 +600,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_adaptive_pos_12.add_argument("--run-dir", required=True)
     validate_adaptive_pos_12.set_defaults(func=cmd_validate_pos_adaptive_12)
+
+    primary_adaptive_pos = commands.add_parser(
+        "pos-fit-primary-adaptive",
+        help=(
+            "CPU only: all-head seed-42 screen and held-out confirmation at "
+            "progress .5, middle depth only"
+        ),
+    )
+    primary_adaptive_pos.add_argument("--run-dir", required=True)
+    primary_adaptive_pos.add_argument("--local-cache")
+    primary_adaptive_pos.add_argument("--budget-seconds", type=int, default=18000)
+    primary_adaptive_pos.add_argument(
+        "--validation-reserve-seconds", type=int, default=900
+    )
+    primary_adaptive_pos.add_argument(
+        "--worker-counts", type=int, nargs="+", default=[6, 8, 10, 12]
+    )
+    primary_adaptive_pos.set_defaults(func=cmd_pos_fit_primary_adaptive)
+
+    validate_primary_adaptive_pos = commands.add_parser(
+        "validate-pos-primary-adaptive",
+        help="validate confirmed primary-condition-only POS evidence",
+    )
+    validate_primary_adaptive_pos.add_argument("--run-dir", required=True)
+    validate_primary_adaptive_pos.set_defaults(func=cmd_validate_pos_primary_adaptive)
 
     derive = commands.add_parser(
         "derive-relation-locks",

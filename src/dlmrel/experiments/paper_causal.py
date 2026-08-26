@@ -294,6 +294,9 @@ def _pos_control_pairs() -> list[tuple[str, int, int]]:
     if not adaptive_manifest_path.is_file() and (run_dir / "pos_adaptive_12").is_dir():
         run_dir = run_dir / "pos_adaptive_12"
         adaptive_manifest_path = run_dir / "adaptive_manifest.json"
+    if not adaptive_manifest_path.is_file() and (run_dir / "pos_adaptive_primary").is_dir():
+        run_dir = run_dir / "pos_adaptive_primary"
+        adaptive_manifest_path = run_dir / "adaptive_manifest.json"
     if adaptive_manifest_path.is_file():
         try:
             manifest = json.loads(adaptive_manifest_path.read_text(encoding="utf-8"))
@@ -302,18 +305,23 @@ def _pos_control_pairs() -> list[tuple[str, int, int]]:
         adaptive_schema = manifest.get("schema_version")
         if (
             adaptive_schema
-            not in {"dlmrel-pos-adaptive-v1", "dlmrel-pos-adaptive-12-v1"}
+            not in {
+                "dlmrel-pos-adaptive-v1",
+                "dlmrel-pos-adaptive-12-v1",
+                "dlmrel-pos-primary-adaptive-v1",
+            }
             or manifest.get("status") != "confirmed"
             or manifest.get("matched_causal_ablation_allowed") is not True
             or manifest.get("adaptive_reduced_grid") is not True
         ):
             raise ArtifactError("adaptive POS rankings have not passed held-out confirmation")
         choices_path = run_dir / "pos_head_choices.csv"
-        rankings_path = run_dir / (
-            "pos_head_rankings_adaptive_12.csv"
-            if adaptive_schema == "dlmrel-pos-adaptive-12-v1"
-            else "pos_head_rankings_adaptive.csv"
-        )
+        ranking_names = {
+            "dlmrel-pos-adaptive-v1": "pos_head_rankings_adaptive.csv",
+            "dlmrel-pos-adaptive-12-v1": "pos_head_rankings_adaptive_12.csv",
+            "dlmrel-pos-primary-adaptive-v1": "pos_head_rankings_primary.csv",
+        }
+        rankings_path = run_dir / ranking_names[adaptive_schema]
         coverage_path = run_dir / "coverage_manifest.csv"
         if not all(path.is_file() for path in (choices_path, rankings_path, coverage_path)):
             raise ArtifactError("adaptive POS ranking bundle is incomplete")
@@ -352,11 +360,11 @@ def _pos_control_pairs() -> list[tuple[str, int, int]]:
                 raise ArtifactError("adaptive POS choice has an invalid head identifier")
             layer = int(row.actual_layer_index)
             label = str(row.relative_label)
-            protocol_suffix = (
-                "primary_p050_fixed12"
-                if adaptive_schema == "dlmrel-pos-adaptive-12-v1"
-                else "primary_p050"
-            )
+            protocol_suffix = {
+                "dlmrel-pos-adaptive-v1": "primary_p050",
+                "dlmrel-pos-adaptive-12-v1": "primary_p050_fixed12",
+                "dlmrel-pos-primary-adaptive-v1": "primary_p050_only",
+            }[adaptive_schema]
             pairs.extend(
                 (
                     (
