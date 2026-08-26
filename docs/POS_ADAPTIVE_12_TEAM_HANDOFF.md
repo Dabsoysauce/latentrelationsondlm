@@ -78,10 +78,32 @@ Before running in Colab, push the branch:
 git push -u origin optimize/adaptive-pos-cpu-under-3h
 ```
 
+The branch has been pushed to `origin` as of 2026-08-25.
+
 Then paste `scripts/colab_pos_adaptive_12_cell.py` into one Colab cell. It mounts
 Drive, verifies the exact commit, disables CUDA, installs the CPU dependencies,
 runs the focused pilot, benchmarks 6/8/10/12 workers, resumes atomically, validates
 the bundle, and prints the artifact paths.
+
+The equivalent notebook is `notebooks/DiffuLLaMA_POS_Adaptive_12.ipynb`.
+
+## Dream-7B replica
+
+`notebooks/Dream_POS_Adaptive_12.ipynb` runs the same frozen allocation and
+validation under a separate Dream identity:
+
+- model: `configs/models/dream_7b.yaml`;
+- result root: `/content/drive/MyDrive/dlmrel-paper-results/dream`;
+- run ID: `paper-restoration-v1-dream-pos-token-class-linear-probes`;
+- output: the Dream run's own `pos_adaptive_12/` directory.
+
+The CPU protocol itself is model-generic and does not load Dream. Unlike the
+completed DiffuLLaMA extraction, Dream extraction has not been inventoried here.
+The Dream notebook therefore checks for exactly 180 validated feature chunks and
+fails closed if they are absent. It contains a separate `RUN_EXTRACTION` gate,
+disabled by default, for completing Dream extraction on a GPU. After extraction,
+switch to the 12-logical-CPU runtime before fitting. Never point the Dream
+notebook at the DiffuLLaMA result root or reuse rankings across models.
 
 Direct command after checkout:
 
