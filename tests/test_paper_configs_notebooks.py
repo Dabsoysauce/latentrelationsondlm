@@ -185,6 +185,46 @@ def test_primary_pos_notebooks_are_cpu_only_pinned_resumable_launchers():
     assert "exploratory_extensions/dream_7b" in rendered[1]
 
 
+def test_fixed12_pos_notebooks_append_fail_closed_resumable_ablation():
+    cases = {
+        "DiffuLLaMA_POS_Adaptive_12.ipynb": (
+            "diffullama_7b",
+            "configs/models/diffullama_7b.yaml",
+            "requirements/diffullama.txt",
+        ),
+        "Dream_POS_Adaptive_12.ipynb": (
+            "dream_7b",
+            "configs/models/dream_7b.yaml",
+            "requirements/dream.txt",
+        ),
+    }
+    for name, (model_id, model_config, requirements) in cases.items():
+        notebook = json.loads((ROOT / "notebooks" / name).read_text())
+        appended = notebook["cells"][-3:]
+        assert appended[0]["cell_type"] == "markdown"
+        assert "matched POS-head causal ablation (GPU follow-on)" in "".join(
+            appended[0]["source"]
+        )
+        rendered = "\n".join("".join(cell["source"]) for cell in appended)
+        for required in (
+            "validate-pos-adaptive-12",
+            "matched_causal_ablation_allowed",
+            "DLMREL_POS_HEAD_RANKINGS",
+            "validate-selection-locks",
+            "selection_bundle.json",
+            "matched_relation_head_ablation.yaml",
+            "--resume",
+            "Already complete; skipping model inference",
+            model_id,
+            model_config,
+            requirements,
+        ):
+            assert required in rendered
+        assert "pos-stage" not in rendered
+        for cell in appended[1:]:
+            ast.parse("".join(cell["source"]))
+
+
 def test_fake_cli_runs_and_validates_all_ten_canonical_experiments(tmp_path, capsys, monkeypatch):
     results = tmp_path / "p"
 
