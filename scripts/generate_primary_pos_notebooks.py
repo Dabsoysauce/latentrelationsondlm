@@ -106,6 +106,7 @@ run(
     'python', '-m', 'dlmrel.cli', 'pos-fit-primary-adaptive',
     '--run-dir', RUN_DIR,
     '--local-cache', LOCAL_CACHE,
+    '--resume',
     '--budget-seconds', str(TOTAL_BUDGET_SECONDS),
     '--validation-reserve-seconds', str(VALIDATION_RESERVE_SECONDS),
     '--worker-counts', *map(str, worker_counts),

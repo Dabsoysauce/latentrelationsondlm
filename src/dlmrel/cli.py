@@ -610,6 +610,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     primary_adaptive_pos.add_argument("--run-dir", required=True)
     primary_adaptive_pos.add_argument("--local-cache")
+    primary_adaptive_pos.add_argument(
+        "--resume",
+        action="store_true",
+        help="explicitly document the default checkpoint-preserving resume behavior",
+    )
     primary_adaptive_pos.add_argument("--budget-seconds", type=int, default=18000)
     primary_adaptive_pos.add_argument(
         "--validation-reserve-seconds", type=int, default=900
