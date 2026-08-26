@@ -477,6 +477,34 @@ def _evaluate(fitted, train: pd.DataFrame, test: pd.DataFrame, *, seed: int):
     return evidence, metrics
 
 
+def _evaluate_main_only(fitted, train: pd.DataFrame, test: pd.DataFrame, *, seed: int):
+    """Evaluate only the scientific probe used for ranking.
+
+    This is numerically identical to the main-classifier portion of ``_evaluate``.
+    Reduced protocols use it for screening and held-out ranking, then run the
+    ordinary full logical probe (including both controls) for the final causal
+    heads. It never writes a canonical fit checkpoint.
+    """
+    from sklearn.metrics import accuracy_score, f1_score
+
+    scaler, classifier, _train_x, _scaled_train_x, train_y = fitted
+    test_x = np.stack(test["feature"].map(np.asarray))
+    test_y = test["label"].to_numpy()
+    prediction = classifier.predict(scaler.transform(test_x))
+    majority = Counter(train_y).most_common(1)[0][0]
+    evidence = test.drop(columns="feature").copy()
+    evidence["prediction"] = prediction
+    evidence["majority_prediction"] = majority
+    metrics = {
+        "accuracy": accuracy_score(test_y, prediction),
+        "macro_f1": f1_score(test_y, prediction, average="macro", zero_division=0),
+        "majority_accuracy": accuracy_score(test_y, np.repeat(majority, len(test_y))),
+        "n_positions": len(test_y),
+        "class_counts": dict(Counter(test_y)),
+    }
+    return evidence, metrics
+
+
 def _fit_evaluate_probe(
     train: pd.DataFrame,
     test: pd.DataFrame,
@@ -487,6 +515,17 @@ def _fit_evaluate_probe(
     """Fit one scientifically independent probe without touching shared state."""
     fitted = _fit(train, seed=seed, regularization=regularization)
     return _evaluate(fitted, train, test, seed=seed)
+
+
+def _fit_evaluate_main_only(
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    *,
+    seed: int,
+    regularization: float,
+):
+    fitted = _fit(train, seed=seed, regularization=regularization)
+    return _evaluate_main_only(fitted, train, test, seed=seed)
 
 
 def _condition_prefix(stage: str, seed: int, progress: float, timestep: int) -> str:
