@@ -183,6 +183,44 @@ def load_relation_locks(path: str | Path, cfg: RunConfig | None = None) -> Relat
     return RelationLockSet(source=source, source_kind="six_relation_bundle", locks=locks)
 
 
+def load_confirmatory_relation_locks(
+    path: str | Path, cfg: RunConfig | None = None
+) -> RelationLockSet:
+    """Load locks only after the full masked select/dev/permutation protocol passes."""
+    locks = load_relation_locks(path, cfg)
+    if locks.source_kind != "six_relation_bundle":
+        raise ArtifactError("confirmatory causal analyses require the canonical six-relation bundle")
+
+    run = locks.source.parent
+    summary = _read_json(run / "summary.json")
+    validation = _read_json(run / "validation.json")
+    permutation = run / "selection_permutation_results.csv"
+    required_null = "within_instance_valid_receiver_full_select_dev_test_protocol"
+    if validation.get("schema_version") != RUN_SCHEMA or not validation.get("valid"):
+        raise ArtifactError("selection source is not a complete validated head-search run")
+    if summary.get("permutation_null") != required_null:
+        raise ArtifactError("selection source lacks the required selection-aware permutation test")
+    if not permutation.is_file():
+        raise ArtifactError("selection source is missing selection_permutation_results.csv")
+    permutation_rows = pd.read_csv(permutation)
+    required = {"relation", "raw_p_value", "holm_adjusted_p_value"}
+    if required - set(permutation_rows) or set(permutation_rows["relation"]) != set(RELATION_NAMES):
+        raise ArtifactError("selection permutation results are incomplete or malformed")
+
+    protocol = _read_json(locks.source / "relation_selection_bundle.json").get(
+        "selection_protocol", {}
+    )
+    if (
+        protocol.get("selection_progress") != 0.0
+        or protocol.get("selection_timestep") != 0
+        or protocol.get("dev_gate") != "select top-K candidates only"
+        or protocol.get("row_aggregation") != "mean"
+        or protocol.get("span_aggregation") != "sum"
+    ):
+        raise ArtifactError("selection source is not the frozen masked select/dev protocol")
+    return locks
+
+
 def filter_relation_locked_rows(rows: pd.DataFrame, locks: RelationLockSet) -> pd.DataFrame:
     """Keep each relation only at its own selected head; never broadcast one lock."""
     required = {"relation", "layer", "head"}
@@ -529,6 +567,15 @@ def _validate_protocol_config(config: RunConfig) -> None:
         raise ArtifactError(f"source seeds must be exactly {list(REQUIRED_SEEDS)}")
     if scoring.top_k != TOP_K or scoring.primary_relation != PRIMARY_RELATION:
         raise ArtifactError("source scoring must use top_k=5 and object_to_verb as primary")
+    if (
+        scoring.primary_visibility != "both_masked"
+        or scoring.attender_rows != "mean"
+        or scoring.receiver_span != "sum"
+        or selection_progress(config) != 0.0
+    ):
+        raise ArtifactError(
+            "source selection must use masked timestep 0 with mean-row/sum-span scoring"
+        )
     for label, revision in (
         ("model", config.model.revision),
         ("tokenizer", config.model.tokenizer_revision),
@@ -919,6 +966,7 @@ def _protocol(config: RunConfig) -> dict[str, Any]:
         "steps": config.experiment.steps,
         "selection_progress": selection_progress(config),
         "selection_timestep": round(selection_progress(config) * (config.experiment.steps - 1)),
+        "primary_visibility": config.experiment.scoring.primary_visibility,
         "row_aggregation": config.experiment.scoring.attender_rows,
         "span_aggregation": config.experiment.scoring.receiver_span,
     }

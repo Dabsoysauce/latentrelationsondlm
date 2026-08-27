@@ -16,7 +16,7 @@ from ..checkpoints import CheckpointIdentity, SentenceCheckpointStore
 from ..config import RELATION_NAMES, RunConfig
 from ..data import load_manifest_examples
 from ..diffusion import attention_batches_for_states, teacher_forced_trajectory, tokenize
-from ..paper_protocol import PaperLockSet, write_resolved_selection_locks
+from ..relation_selection import RelationLockSet, write_resolved_lock_manifest
 from .shared import write_frames
 
 
@@ -93,7 +93,7 @@ def fully_visible_evidence(model, tokenizer, sentences: list[str]):
     return pd.DataFrame(attention_rows), pd.DataFrame(summary_rows)
 
 
-def _frozen_cases(examples, locks: PaperLockSet) -> list[HeatmapCase]:
+def _frozen_cases(examples, locks: RelationLockSet) -> list[HeatmapCase]:
     cases = []
     seen = set()
     for example in examples:
@@ -133,7 +133,7 @@ def trajectory_chunk(
     cases,
     *,
     seed: int,
-    locks: PaperLockSet,
+    locks: RelationLockSet,
     batch_size: int = 8,
     maximum_batch_size: int | None = None,
 ):
@@ -276,7 +276,7 @@ def run(
     cfg: RunConfig,
     run_dir: Path,
     *,
-    source_locks: PaperLockSet,
+    source_locks: RelationLockSet,
     **_unused: Any,
 ):
     sentences = _qualitative_sentences(cfg.experiment.settings["qualitative_manifest"])
@@ -340,7 +340,7 @@ def run(
         n_seeds=("seed", "nunique"),
     ).to_csv(run_dir / "metrics.csv", index=False)
     figure_paths = plot_saved_evidence(run_dir)
-    write_resolved_selection_locks(run_dir, source_locks)
+    write_resolved_lock_manifest(run_dir, source_locks)
     return {
         "development_used": False,
         "qualitative_source": "preserved_diffugpt_attention_head_trajectories",

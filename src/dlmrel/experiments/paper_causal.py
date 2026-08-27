@@ -16,12 +16,14 @@ from ..config import RunConfig
 from ..data import load_manifest_examples
 from ..diffusion import TrajectoryStateCache, state_at_time
 from ..models.decomposition import ablate_projection_batch, capture_projection_inputs
-from ..paper_protocol import PaperLockSet, projection_head_slice, write_resolved_selection_locks
+from ..paper_protocol import projection_head_slice
+from ..relation_selection import RelationLockSet, write_resolved_lock_manifest
 from .shared import instance_metadata, write_frames
 
 
-def _selection_scores_path(locks: PaperLockSet) -> Path:
+def _selection_scores_path(locks: RelationLockSet) -> Path:
     candidates = [
+        locks.source.parent / "select_all_head_scores.csv",
         locks.source.parent / "selection_all_head_scores.csv",
         locks.source / "selection_all_head_scores.csv",
     ]
@@ -33,7 +35,7 @@ def _selection_scores_path(locks: PaperLockSet) -> Path:
     )
 
 
-def matched_low_relation_controls(locks: PaperLockSet) -> dict[str, tuple[int, int]]:
+def matched_low_relation_controls(locks: RelationLockSet) -> dict[str, tuple[int, int]]:
     scores = pd.read_csv(_selection_scores_path(locks))
     controls = {}
     for relation, lock in locks.locks.items():
@@ -186,7 +188,7 @@ def run_dla(
     cfg: RunConfig,
     run_dir: Path,
     *,
-    source_locks: PaperLockSet,
+    source_locks: RelationLockSet,
     **_unused: Any,
 ):
     examples, exclusions = load_manifest_examples(cfg, tokenizer, "test")
@@ -257,9 +259,10 @@ def run_dla(
         - relation_selectivity["matched_low_relation_head"]
     )
     relation_selectivity.to_csv(run_dir / "relation_type_selectivity.csv", index=False)
-    write_resolved_selection_locks(run_dir, source_locks)
+    write_resolved_lock_manifest(run_dir, source_locks)
     return {
-        "development_used": False,
+        "development_used_for_selection": True,
+        "selection_aware_permutation_required": True,
         "exact_decomposition": True,
         "approximation_used": False,
         "diagnostic_timesteps": cfg.experiment.settings["diagnostic_timesteps"],
@@ -442,7 +445,7 @@ def run_ablation(
     cfg: RunConfig,
     run_dir: Path,
     *,
-    source_locks: PaperLockSet,
+    source_locks: RelationLockSet,
     **_unused: Any,
 ):
     examples, exclusions = load_manifest_examples(cfg, tokenizer, "test")
@@ -515,9 +518,10 @@ def run_ablation(
         raw_denominator=("raw_denominator", "sum"),
         n_seeds=("seed", "nunique"),
     ).to_csv(run_dir / "metrics.csv", index=False)
-    write_resolved_selection_locks(run_dir, source_locks)
+    write_resolved_lock_manifest(run_dir, source_locks)
     return {
-        "development_used": False,
+        "development_used_for_selection": True,
+        "selection_aware_permutation_required": True,
         "causal_intervention": True,
         "intervention": "zero_exact_requested_o_proj_input_head_slice",
         "diagnostic_timesteps": cfg.experiment.settings["diagnostic_timesteps"],

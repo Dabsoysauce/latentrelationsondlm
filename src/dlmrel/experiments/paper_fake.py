@@ -15,6 +15,7 @@ from ..paper_protocol import (
     write_resolved_selection_locks,
     write_selection_bundle,
 )
+from ..relation_selection import RelationLockSet, write_resolved_lock_manifest
 from .shared import write_frames
 
 FAKE_HEADS = tuple((layer, head) for layer in range(2) for head in range(3))
@@ -90,7 +91,9 @@ def _selection(cfg: RunConfig, run_dir: Path, manifest_hashes):
     }
 
 
-def _generic(cfg: RunConfig, run_dir: Path, source_locks: PaperLockSet | None):
+def _generic(
+    cfg: RunConfig, run_dir: Path, source_locks: PaperLockSet | RelationLockSet | None
+):
     rows = []
     time_resolved = len(cfg.experiment.normalized_progress) == 64
     progress_points = (
@@ -174,7 +177,10 @@ def _generic(cfg: RunConfig, run_dir: Path, source_locks: PaperLockSet | None):
         n_seeds=("seed", "nunique"),
     ).to_csv(run_dir / "metrics.csv", index=False)
     if source_locks is not None:
-        write_resolved_selection_locks(run_dir, source_locks)
+        if isinstance(source_locks, RelationLockSet):
+            write_resolved_lock_manifest(run_dir, source_locks)
+        else:
+            write_resolved_selection_locks(run_dir, source_locks)
     if cfg.experiment.type in {
         "final_token_prediction_by_layer",
         "prediction_before_unmasking_timing_analysis",
@@ -204,7 +210,7 @@ def run(
     run_dir: Path,
     *,
     manifest_hashes: dict[str, str],
-    source_locks: PaperLockSet | None,
+    source_locks: PaperLockSet | RelationLockSet | None,
     **_unused: Any,
 ) -> dict[str, Any]:
     if cfg.experiment.type == "relation_head_receiver_prediction":

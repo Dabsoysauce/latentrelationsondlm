@@ -17,6 +17,7 @@ from dlmrel.checkpoints import SentenceCheckpointStore
 from dlmrel.cli import main
 from dlmrel.config import RELATION_NAMES, RunConfig
 from dlmrel.fake_run import _all_head_rows, run_fake
+from dlmrel.relation_selection import load_confirmatory_relation_locks
 
 ROOT = Path(__file__).parents[1]
 MANIFESTS = {"select": "select-fixture", "dev": "dev-fixture", "test": "test-fixture"}
@@ -95,6 +96,20 @@ def _mock_test_examples(monkeypatch, cfg):
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_confirmatory_locks_require_completed_selection_aware_permutations(
+    completed_fake_run, tmp_path
+):
+    locks = load_confirmatory_relation_locks(
+        completed_fake_run / "relation-selection", _cfg(completed_fake_run)
+    )
+    assert set(locks.locks) == set(RELATION_NAMES)
+
+    incomplete = shutil.copytree(completed_fake_run, tmp_path / "no-permutations")
+    (incomplete / "selection_permutation_results.csv").unlink()
+    with pytest.raises(ArtifactError, match="missing selection_permutation_results"):
+        load_confirmatory_relation_locks(incomplete / "relation-selection", _cfg(incomplete))
 
 
 def test_legacy_locked_head_evidence_is_reusable_but_permutation_incomplete(

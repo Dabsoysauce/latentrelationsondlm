@@ -743,23 +743,46 @@ def _validate_experiment_artifacts(path, cfg, instances, summary, errors: list[s
             "multilingual_relation_head_transfer",
         }
         if lock_required:
-            resolved_path = path / "selection_locks.resolved.json"
+            rigorous_consumers = {
+                "direct_logit_attribution",
+                "matched_relation_head_ablation",
+                "attention_heatmaps_and_trajectories",
+            }
+            resolved_name = (
+                "relation_locks.resolved.json"
+                if cfg.experiment.type in rigorous_consumers
+                else "selection_locks.resolved.json"
+            )
+            resolved_path = path / resolved_name
             if not resolved_path.is_file():
-                errors.append("paper locked experiment is missing selection_locks.resolved.json")
+                errors.append(f"paper locked experiment is missing {resolved_name}")
             else:
                 try:
-                    from .paper_protocol import load_selection_bundle
-
                     resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
-                    locks = load_selection_bundle(
-                        resolved["source"],
-                        model_id=cfg.model.id,
-                        model_revision=cfg.model.revision,
-                    )
-                    expected = {
-                        relation: {"layer": lock.layer, "head": lock.head}
-                        for relation, lock in locks.locks.items()
-                    }
+                    if cfg.experiment.type in rigorous_consumers:
+                        from .relation_selection import load_confirmatory_relation_locks
+
+                        locks = load_confirmatory_relation_locks(resolved["source"], cfg)
+                        expected = {
+                            relation: {
+                                "layer": lock.layer,
+                                "head": lock.head,
+                                "selection_lock_hash": selection_lock_hash(lock),
+                            }
+                            for relation, lock in locks.locks.items()
+                        }
+                    else:
+                        from .paper_protocol import load_selection_bundle
+
+                        locks = load_selection_bundle(
+                            resolved["source"],
+                            model_id=cfg.model.id,
+                            model_revision=cfg.model.revision,
+                        )
+                        expected = {
+                            relation: {"layer": lock.layer, "head": lock.head}
+                            for relation, lock in locks.locks.items()
+                        }
                     if resolved.get("relations") != expected:
                         errors.append("resolved paper locks differ from their immutable source")
                 except (

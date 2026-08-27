@@ -14,7 +14,11 @@ import torch
 from .artifacts import ArtifactError, atomic_json, final_artifact_hashes
 from .config import RunConfig, is_paper_experiment
 from .paper_protocol import PaperLockSet
-from .relation_selection import RelationLockSet, load_relation_locks
+from .relation_selection import (
+    RelationLockSet,
+    load_confirmatory_relation_locks,
+    load_relation_locks,
+)
 
 ATTENTION_ROW_SUM_TOLERANCE = 1e-2
 _WORST_ROWS_PER_LAYER = 1
@@ -160,6 +164,12 @@ def load_adapter(cfg: RunConfig):
 
 
 def read_source_locks(path: str | Path, cfg: RunConfig) -> RelationLockSet | PaperLockSet:
+    if cfg.experiment.type in {
+        "direct_logit_attribution",
+        "matched_relation_head_ablation",
+        "attention_heatmaps_and_trajectories",
+    }:
+        return load_confirmatory_relation_locks(path, cfg)
     if is_paper_experiment(cfg.experiment):
         from .experiments.paper_relation import load_paper_locks
 
