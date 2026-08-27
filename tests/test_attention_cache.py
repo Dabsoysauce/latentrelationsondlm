@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from dlmrel.artifacts import atomic_json, initialize_run
 from dlmrel.checkpoints import CheckpointIdentity, SentenceCheckpointStore
@@ -40,6 +41,14 @@ def _cache_rows(chunk, seed, depths):
     return pd.DataFrame(rows)
 
 
+@pytest.mark.skip(
+    reason=(
+        "relation_head_receiver_prediction_over_diffusion_time is now a blocked "
+        "legacy experiment type (old restored fully-visible/last-token-argmax "
+        "protocol); its attention-cache-reuse feature has no rigorous-protocol "
+        "equivalent and is not part of the current paper pipeline."
+    )
+)
 def test_completed_time_run_entropy_cache_is_validated_and_reused(tmp_path):
     source_cfg = RunConfig.load_files(
         ROOT / "configs/models/fake.yaml",

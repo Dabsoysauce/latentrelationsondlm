@@ -33,6 +33,16 @@ def test_all_shipped_run_configs_are_consumed():
 
 
 def test_every_experiment_yaml_is_strictly_consumed_with_fake_model():
+    # These three implement the old restored last-token-argmax, fully-visible
+    # protocol (no dev arbitration, no permutation testing) and are now
+    # blocked at config-validation time -- see config.py's
+    # _validate_paper_protocol. Use head_search / time_curve / the
+    # external_treebank_transfer track instead.
+    blocked_legacy_types = {
+        "relation_head_receiver_prediction",
+        "relation_head_receiver_prediction_over_diffusion_time",
+        "multilingual_relation_head_transfer",
+    }
     for experiment in sorted((ROOT / "configs/experiments").glob("*.yaml")):
         raw = yaml.safe_load(experiment.read_text())
         assert raw["seeds"] == [42, 43, 44]
@@ -41,6 +51,10 @@ def test_every_experiment_yaml_is_strictly_consumed_with_fake_model():
             if raw.get("track") == "external_treebank_transfer"
             else ROOT / "configs/datasets/ewt.yaml"
         )
+        if raw.get("type") in blocked_legacy_types:
+            with pytest.raises(ConfigError, match="old restored"):
+                RunConfig.load_files(ROOT / "configs/models/fake.yaml", dataset, experiment)
+            continue
         RunConfig.load_files(ROOT / "configs/models/fake.yaml", dataset, experiment)
 
 

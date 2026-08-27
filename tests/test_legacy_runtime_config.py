@@ -32,7 +32,7 @@ def _resolved() -> dict:
     return RunConfig.load_files(
         "configs/models/dream_7b.yaml",
         "configs/datasets/ewt.yaml",
-        "configs/experiments/relation_head_receiver_prediction.yaml",
+        "configs/experiments/head_search.yaml",
         runtime=RuntimeConfig(),
     ).to_dict()
 

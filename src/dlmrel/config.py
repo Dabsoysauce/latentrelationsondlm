@@ -186,6 +186,30 @@ class ExperimentConfig:
             raise ConfigError("scoring settings do not match the frozen protocol")
 
     def _validate_paper_protocol(self) -> None:
+        _LEGACY_TYPE_REPLACEMENTS = {
+            "relation_head_receiver_prediction": (
+                "head_search (configs/experiments/head_search.yaml)"
+            ),
+            "relation_head_receiver_prediction_over_diffusion_time": (
+                "time_curve (configs/experiments/time_curve.yaml), run against "
+                "head_search's locks"
+            ),
+            "multilingual_relation_head_transfer": (
+                "the external_treebank_transfer track "
+                "(configs/experiments/external_transfer.yaml), run against "
+                "head_search's locks"
+            ),
+        }
+        if self.type in _LEGACY_TYPE_REPLACEMENTS:
+            raise ConfigError(
+                f"{self.type!r} implements the old restored last-token-argmax, "
+                "fully-visible-selection protocol (no dev arbitration, no "
+                "permutation testing) -- it is a sensitivity-analysis artifact only "
+                "and must not be used for primary paper results. Use "
+                f"{_LEGACY_TYPE_REPLACEMENTS[self.type]} instead, which implements "
+                "the rigorous mean/sum both_masked protocol with real select->dev "
+                "arbitration and permutation testing."
+            )
         if self.id != self.type and self.id != "attention_entropy":
             raise ConfigError("corrected paper config id and type must be identical")
         frozen = ScoringConfig(
