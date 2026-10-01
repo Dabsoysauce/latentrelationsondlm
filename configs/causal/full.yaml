@@ -1,0 +1,14 @@
+relations: [object_to_verb, subject_to_verb, object_adj_to_noun, subject_adj_to_noun, object_det_to_noun, subject_det_to_noun]
+seeds: [42, 43, 44]
+examples: 100
+batch_size: 1
+alphas: [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
+windows: [entire, early_pre, late_pre, pre, post]
+controls: [random, same_layer, low_relation, other_relation, matched_attention]
+start: 0
+stop: 64
+split: 0.5
+temperature: 0.95
+top_p: 0.9
+control_seed: 1729
+bootstrap_samples: 2000
