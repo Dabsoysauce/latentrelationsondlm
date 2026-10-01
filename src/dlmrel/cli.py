@@ -412,6 +412,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="dlmrel", description="Restored old-paper experiments for diffusion language models"
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    from .experiments.causal_run import add_parser as add_causal_parser
+
+    add_causal_parser(commands)
 
     prepare = commands.add_parser("prepare", help="verify one treebank and write official manifests")
     prepare.add_argument("--dataset", required=True)

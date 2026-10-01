@@ -1,0 +1,14 @@
+relations: [object_to_verb]
+seeds: [42, 43, 44]
+examples: 4
+batch_size: 1
+alphas: [0.0, 1.0]
+windows: [pre, post, entire]
+controls: [random, same_layer, low_relation, other_relation, matched_attention]
+start: 0
+stop: 64
+split: 0.5
+temperature: 0.95
+top_p: 0.9
+control_seed: 1729
+bootstrap_samples: 2000

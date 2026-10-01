@@ -77,3 +77,15 @@ Entropy with `--attention-cache`. Ordinary sentence loops retain atomic
 
 See [the frozen protocol](docs/PROTOCOL.md), [GPU running
 instructions](docs/RUNNING.md), and [implementation status](docs/STATUS.md).
+
+## Causal validation of existing heads
+
+`dlmrel causal-run` performs paired, free-running reconstruction with scaled or
+zeroed head outputs during configurable revelation windows. Targets are read
+from existing validated locks; it never discovers or ranks new target heads.
+Matched controls, non-target recovery, other-relation outcomes, paired statistics,
+and PDF/PNG plots accompany the behavioral endpoints. This exploratory extension
+has its own inference protocol and preserves the ten experiments above.
+
+See [the implementation note and reproduction commands](docs/CAUSAL_INTERVENTIONS.md).
+Start with `--smoke-test`, inspect the pilot, then explicitly expand the grid.

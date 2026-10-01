@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from contextlib import nullcontext
 from typing import Any
 
 import torch
@@ -76,6 +77,11 @@ def random_reveal_trajectories(
     generation_length: int = 96,
     temperature: float = 0.95,
     top_p: float = 0.9,
+    reconstruction_ids: torch.Tensor | None = None,
+    reconstruction_mask: torch.Tensor | None = None,
+    reveal_plan: torch.Tensor | None = None,
+    forward_context=None,
+    observer=None,
     **_unused: Any,
 ) -> tuple[NativeTrajectory, ...]:
     """Batch independent prompts while replaying each trajectory's exact RNG stream.
@@ -108,6 +114,23 @@ def random_reveal_trajectories(
     maskable = torch.zeros_like(base, dtype=torch.bool)
     for batch_index, prefix_length in enumerate(prefix_lengths):
         maskable[batch_index, prefix_length:] = True
+    if reconstruction_ids is not None:
+        if reconstruction_mask is None or reconstruction_mask.shape != reconstruction_ids.shape:
+            raise ValueError("reconstruction requires equally shaped ids and mask")
+        if reconstruction_ids.ndim != 2 or len(reconstruction_ids) != len(prompts):
+            raise ValueError("reconstruction batch must match prompts")
+        if reconstruction_mask.dtype != torch.bool or bool(reconstruction_mask[:, 0].any()):
+            raise ValueError("reconstruction mask must be boolean with BOS visible")
+        base = reconstruction_ids.to(adapter.device).clone()
+        maskable = reconstruction_mask.to(adapter.device).clone()
+        generation_length = base.shape[1]
+        prefix_lengths = [1] * len(prompts)
+    if reveal_plan is not None:
+        if reveal_plan.shape != (steps, *base.shape) or reveal_plan.dtype != torch.bool:
+            raise ValueError("reveal plan must be boolean [steps, batch, tokens]")
+        if not torch.equal(reveal_plan.sum(dim=0).cpu(), maskable.long().cpu()):
+            raise ValueError("reveal plan must reveal each masked position exactly once")
+        reveal_plan = reveal_plan.to(adapter.device)
     xt = base.masked_fill(maskable, int(tokenizer.mask_token_id))
     current_mask = maskable.clone()
 
@@ -123,7 +146,9 @@ def random_reveal_trajectories(
     for step_index in range(steps):
         for batch_index in range(len(prompts)):
             states[batch_index].append(xt[batch_index].detach().cpu().clone())
-        raw_logits = _forward_logits(adapter, xt)
+        context = nullcontext() if forward_context is None else forward_context(step_index, current_mask)
+        with context:
+            raw_logits = _forward_logits(adapter, xt)
         logits = aligned_logits(raw_logits, xt, int(adapter.prediction_offset))
         remaining_steps = steps - step_index
         for batch_index in range(len(prompts)):
@@ -142,6 +167,11 @@ def random_reveal_trajectories(
             )
             if remaining_steps == 1:
                 reveal = row_mask
+            if reveal_plan is not None:
+                reveal = reveal_plan[step_index, batch_index : batch_index + 1]
+            if observer is not None:
+                observer(step_index, batch_index, xt[batch_index], row_mask[0],
+                         logits[batch_index], reveal[0])
             xt[batch_index : batch_index + 1] = xt[
                 batch_index : batch_index + 1
             ].masked_scatter(reveal, final[reveal])
@@ -167,6 +197,8 @@ def random_reveal_trajectories(
                 "pre_forward_states": True,
                 "batched_forward": True,
                 "rng_equivalence": "per_trajectory_global_state_replay",
+                **({"task": "reconstruction", "external_reveal_plan": reveal_plan is not None}
+                   if reconstruction_ids is not None else {}),
             },
         )
         for index, prompt in enumerate(prompts)
